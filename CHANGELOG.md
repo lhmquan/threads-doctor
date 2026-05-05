@@ -1,5 +1,15 @@
 # Changelog — Threads Doctor
 
+## v0.8.3 — 2026-05-05
+
+### Thông báo hoàn thành nạp hàng loạt
+- Sau khi nạp token xong, hiện banner tổng kết: "X thành công, Y thất bại / Z token"
+- Banner màu xanh nếu toàn bộ OK, vàng nếu có lỗi
+- Nút X để đóng banner
+
+### Fix nút Home
+- Nút Home giờ reset đầy đủ: đóng panel nạp hàng loạt, xóa text token, xóa log
+
 ## v0.8.2 — 2026-05-05
 
 ### Hot-reload Update

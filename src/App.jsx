@@ -9,7 +9,7 @@ import { generateReply } from './lib/ai.js'
 import { parseThreadsUrl } from './lib/threads-url.js'
 import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline } from './lib/storage.js'
 
-const APP_VERSION = '0.8.2'
+const APP_VERSION = '0.8.3'
 import { cacheClear, cacheGet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
 function useTheme() {
@@ -444,7 +444,7 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => { navigate('/'); setStatusFilter('all'); setQuery(''); setPage(1); setShowSettings(false) }}
+              onClick={() => { navigate('/'); setStatusFilter('all'); setQuery(''); setPage(1); setShowSettings(false); setShowBulk(false); setBulkText(''); setBulkLog([]) }}
               className="p-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
               title="Trang chủ"
             >
@@ -1129,14 +1129,35 @@ function CacheSizeChip({ label, prefix, onClear }) {
 
 function BulkImportPanel({ bulkText, setBulkText, bulkRunning, bulkLog, bulkProgress, onStart, onStop, bulkDelay = 5 }) {
   const logRef = useRef(null)
+  const [summary, setSummary] = useState(null)
+  const prevRunning = useRef(false)
+
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [bulkLog])
+
+  useEffect(() => {
+    if (prevRunning.current && !bulkRunning && bulkLog.length > 0) {
+      const ok = bulkLog.filter(l => l.ok).length
+      const fail = bulkLog.filter(l => !l.ok).length
+      setSummary({ ok, fail, total: bulkLog.length })
+    }
+    prevRunning.current = bulkRunning
+  }, [bulkRunning, bulkLog])
 
   const lines = bulkText.split('\n').filter(l => l.trim()).length
 
   return (
     <div className="space-y-3">
+      {summary && !bulkRunning && (
+        <div className={`flex items-center justify-between px-4 py-3 rounded-xl border ${summary.fail > 0 ? 'border-amber-500/30 bg-amber-500/5' : 'border-emerald-500/30 bg-emerald-500/5'}`}>
+          <div className="flex items-center gap-2 text-sm">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+            <span>Hoàn thành: <strong className="text-emerald-400">{summary.ok} thành công</strong>{summary.fail > 0 && <>, <strong className="text-rose-400">{summary.fail} thất bại</strong></>} / {summary.total} token</span>
+          </div>
+          <button onClick={() => setSummary(null)} className="text-neutral-400 hover:text-neutral-200"><X className="w-4 h-4" /></button>
+        </div>
+      )}
       <label className="block">
         <span className="text-xs text-neutral-400 dark:text-neutral-400 mb-1 block">Dán danh sách token (mỗi dòng 1 token)</span>
         <textarea
@@ -1162,7 +1183,7 @@ function BulkImportPanel({ bulkText, setBulkText, bulkRunning, bulkLog, bulkProg
             </button>
           )}
           <button
-            onClick={onStart}
+            onClick={() => { setSummary(null); onStart() }}
             disabled={bulkRunning || lines === 0}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-60 text-sm font-medium"
           >
