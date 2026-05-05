@@ -1,5 +1,13 @@
 # Changelog — Threads Doctor
 
+## v0.8.2 — 2026-05-05
+
+### Hot-reload Update
+- Electron load dist/ trực tiếp từ thư mục source (`E:\Antigravity\threads-doctor\dist`)
+- Nút "Cập nhật" restart app (app.relaunch) để load bản build mới
+- Không cần rebuild .exe khi sửa code — chỉ cần `npm run build` rồi nhấn "Cập nhật"
+- Fallback: nếu chạy trên browser thì reload trang
+
 ## v0.8.1 — 2026-05-05
 
 ### Phân trang

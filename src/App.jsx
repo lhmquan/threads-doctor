@@ -9,7 +9,7 @@ import { generateReply } from './lib/ai.js'
 import { parseThreadsUrl } from './lib/threads-url.js'
 import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline } from './lib/storage.js'
 
-const APP_VERSION = '0.8.1'
+const APP_VERSION = '0.8.2'
 import { cacheClear, cacheGet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
 function useTheme() {
@@ -716,11 +716,11 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
       <footer className="max-w-6xl mx-auto px-6 py-6 text-xs text-neutral-400 dark:text-neutral-600 flex items-center justify-between">
         <span>Threads Doctor v{APP_VERSION} · {new Date().getFullYear()}</span>
         <button
-          onClick={() => { window.electronAPI?.openReleaseFolder?.() }}
+          onClick={() => { if (window.electronAPI?.restartApp) { window.electronAPI.restartApp() } else { window.location.reload() } }}
           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-800 text-xs"
-          title="Mở thư mục cập nhật"
+          title="Restart app để áp dụng bản cập nhật mới"
         >
-          <Download className="w-3 h-3" /> Cập nhật
+          <RefreshCw className="w-3 h-3" /> Cập nhật
         </button>
       </footer>
 

@@ -1,5 +1,14 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron')
+const { app, BrowserWindow, ipcMain } = require('electron')
 const path = require('path')
+const fs = require('fs')
+
+const SOURCE_DIR = 'E:\\Antigravity\\threads-doctor'
+const DIST_INDEX = path.join(SOURCE_DIR, 'dist', 'index.html')
+
+function getIndexPath() {
+  if (fs.existsSync(DIST_INDEX)) return DIST_INDEX
+  return path.join(__dirname, '../dist/index.html')
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -12,16 +21,14 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   })
-  win.loadFile(path.join(__dirname, '../dist/index.html'))
+  win.loadFile(getIndexPath())
   win.setMenuBarVisibility(false)
 }
 
-ipcMain.handle('open-release-folder', () => {
-  const releasePath = path.join(app.getAppPath(), '..', '..', '..', '..', 'release')
-  shell.openPath(path.resolve(releasePath))
+ipcMain.handle('restart-app', () => {
+  app.relaunch()
+  app.exit(0)
 })
-
-ipcMain.handle('get-app-path', () => app.getAppPath())
 
 app.whenReady().then(createWindow)
 app.on('window-all-closed', () => app.quit())
