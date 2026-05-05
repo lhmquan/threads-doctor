@@ -8,6 +8,8 @@ import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetch
 import { generateReply } from './lib/ai.js'
 import { parseThreadsUrl } from './lib/threads-url.js'
 import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline } from './lib/storage.js'
+
+const APP_VERSION = '0.8.1'
 import { cacheClear, cacheGet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
 function useTheme() {
@@ -178,7 +180,7 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
 
   const [statusFilter, setStatusFilter] = useState('all')
   const [page, setPage] = useState(1)
-  const perPage = 20
+  const [perPage, setPerPage] = useState(() => Number(localStorage.getItem('td.perPage')) || 20)
 
   const getDuplicateCaptions = (accountId) => {
     const posts = cacheGet(`posts:${accountId}:10`, (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000)
@@ -437,7 +439,7 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
             </div>
             <div>
               <h1 className="text-lg font-semibold">Threads Doctor</h1>
-              <p className="text-xs text-neutral-400 dark:text-neutral-400">Quản lý tài khoản Threads bằng access token</p>
+              <p className="text-xs text-neutral-400 dark:text-neutral-400">Quản lý tài khoản Threads · v{APP_VERSION}</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -680,7 +682,7 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
             )}
           </div>
 
-          {totalPages > 1 && (
+          {filtered.length > 0 && (
             <div className="flex items-center justify-center gap-3 mt-4">
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
@@ -690,7 +692,7 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
                 <ChevronLeft className="w-4 h-4" />
               </button>
               <span className="text-sm text-neutral-400">
-                Trang {safeP}/{totalPages} · {filtered.length} tài khoản
+                Trang {safeP}/{totalPages} · Hiển thị {(safeP - 1) * perPage + 1}–{Math.min(safeP * perPage, filtered.length)}/{filtered.length}
               </span>
               <button
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
@@ -699,13 +701,27 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
               >
                 <ChevronRight className="w-4 h-4" />
               </button>
+              <select
+                value={perPage}
+                onChange={(e) => { const v = Number(e.target.value); setPerPage(v); localStorage.setItem('td.perPage', v); setPage(1) }}
+                className="px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+              >
+                {[10, 20, 50, 100].map(n => <option key={n} value={n}>{n}/trang</option>)}
+              </select>
             </div>
           )}
         </section>
       </main>
 
-      <footer className="max-w-6xl mx-auto px-6 py-6 text-xs text-neutral-400 dark:text-neutral-600">
-        Threads Doctor · {new Date().getFullYear()}
+      <footer className="max-w-6xl mx-auto px-6 py-6 text-xs text-neutral-400 dark:text-neutral-600 flex items-center justify-between">
+        <span>Threads Doctor v{APP_VERSION} · {new Date().getFullYear()}</span>
+        <button
+          onClick={() => { window.electronAPI?.openReleaseFolder?.() }}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-800 text-xs"
+          title="Mở thư mục cập nhật"
+        >
+          <Download className="w-3 h-3" /> Cập nhật
+        </button>
       </footer>
 
       {confirmDelete && (

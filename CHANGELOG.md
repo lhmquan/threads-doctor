@@ -1,5 +1,20 @@
 # Changelog — Threads Doctor
 
+## v0.8.1 — 2026-05-05
+
+### Phân trang
+- Luôn hiện thông tin phân trang (kể cả chỉ 1 trang)
+- Hiển thị chi tiết: "Trang X/Y · Hiển thị 1–20/50"
+- Dropdown chọn số tài khoản/trang: 10, 20, 50, 100 (lưu vào localStorage)
+
+### Hiển thị version
+- Header subtitle hiện version: "Quản lý tài khoản Threads · vX.Y.Z"
+- Footer hiện: "Threads Doctor vX.Y.Z · 2026"
+
+### Nút Cập nhật
+- Footer có nút "Cập nhật" — mở thư mục release chứa file .exe mới
+- Dùng Electron IPC + preload script (contextBridge) để gọi shell.openPath
+
 ## v0.8.0 — 2026-05-05
 
 ### Electron Desktop App
