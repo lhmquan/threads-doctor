@@ -1,5 +1,16 @@
 # Changelog — Threads Doctor
 
+## v0.9.0 — 2026-05-05
+
+### Bộ lọc & sắp xếp nâng cao
+- Lọc nhanh: "Chưa lấy posts" / "Chưa lấy insights" — filter tài khoản chưa có cache data
+- Sắp xếp: Mặc định / Mới nhất / Cũ nhất (theo ngày thêm vào tool) / Follow cao→thấp / thấp→cao
+- Lọc followers theo khoảng: nhập min/max followers
+- Nút "Xóa bộ lọc" reset tất cả filter/sort nâng cao
+- Toolbar lọc/sort nằm giữa StatCards và phần thêm tài khoản
+- Field `addedAt` lưu timestamp khi thêm tài khoản (giữ lại khi update token)
+- Nút Home reset đầy đủ: bao gồm sort, followers range
+
 ## v0.8.3 — 2026-05-05
 
 ### Thông báo hoàn thành nạp hàng loạt

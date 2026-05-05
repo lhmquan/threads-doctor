@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertTriangle, ArrowLeft, BarChart2, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, Clock, ClipboardCopy, Database,
-  Download, ExternalLink, Home, Image as ImageIcon, KeyRound, List, Lock, MessageSquare, Moon, Plus,
+  AlertTriangle, ArrowLeft, ArrowDownUp, BarChart2, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, Clock, ClipboardCopy, Database,
+  Download, ExternalLink, Filter, Home, Image as ImageIcon, KeyRound, List, Lock, MessageSquare, Moon, Plus,
   RefreshCw, Search, Send, Settings, Sparkles, Square, Stethoscope, Sun, Trash2, TrendingDown, TrendingUp, User, X,
 } from 'lucide-react'
 import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetchReplies, fetchRepliesPage, postReply, resolveThreadsUrl, searchKeyword, maskToken } from './lib/threads.js'
@@ -9,7 +9,7 @@ import { generateReply } from './lib/ai.js'
 import { parseThreadsUrl } from './lib/threads-url.js'
 import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline } from './lib/storage.js'
 
-const APP_VERSION = '0.8.3'
+const APP_VERSION = '0.9.0'
 import { cacheClear, cacheGet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
 function useTheme() {
@@ -179,6 +179,9 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
   useEffect(() => { saveSettings(settings) }, [settings])
 
   const [statusFilter, setStatusFilter] = useState('all')
+  const [sortBy, setSortBy] = useState('default')
+  const [followersMin, setFollowersMin] = useState('')
+  const [followersMax, setFollowersMax] = useState('')
   const [page, setPage] = useState(1)
   const [perPage, setPerPage] = useState(() => Number(localStorage.getItem('td.perPage')) || 20)
 
@@ -255,26 +258,53 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
     blocked: accountsWithTokenCheck.filter(a => a.status === 'blocked').length,
     abnormal: accountsWithTokenCheck.filter(a => accountHealthMap[a.id] === 'abnormal').length,
     normal: accountsWithTokenCheck.filter(a => accountHealthMap[a.id] === 'normal' && a.status !== 'error' && a.status !== 'locked' && a.status !== 'blocked').length,
-  }), [accountsWithTokenCheck, accountHealthMap])
+    noPosts: accountsWithTokenCheck.filter(a => !cacheGet(`posts:${a.id}:10`, (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000)).length,
+    noInsights: accountsWithTokenCheck.filter(a => !cacheGet(`insights:${a.id}`, (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000)).length,
+  }), [accountsWithTokenCheck, accountHealthMap, settings])
 
-  const filtered = accountsWithTokenCheck.filter(a => {
-    const q = query.toLowerCase()
-    const matchQuery = !q || (a.username || '').toLowerCase().includes(q) || (a.name || '').toLowerCase().includes(q)
-    if (!matchQuery) return false
-    if (statusFilter === 'abnormal') return accountHealthMap[a.id] === 'abnormal'
-    if (statusFilter === 'normal') return accountHealthMap[a.id] === 'normal' && a.status !== 'error' && a.status !== 'locked' && a.status !== 'blocked'
-    if (statusFilter === 'ok') return a.status === 'ok'
-    if (statusFilter === 'error') return a.status === 'error'
-    if (statusFilter === 'locked') return a.status === 'locked'
-    if (statusFilter === 'blocked') return a.status === 'blocked'
-    return true
-  })
+  const getFollowers = (a) => {
+    const ins = cacheGet(`insights:${a.id}`, (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000)
+    if (ins?.followers_count != null) return ins.followers_count
+    const bl = followersBaseline[a.id]
+    if (bl?.count != null) return bl.count
+    return -1
+  }
+
+  const postsTTL = (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000
+  const insightsTTL = (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000
+
+  const filtered = useMemo(() => {
+    let result = accountsWithTokenCheck.filter(a => {
+      const q = query.toLowerCase()
+      const matchQuery = !q || (a.username || '').toLowerCase().includes(q) || (a.name || '').toLowerCase().includes(q)
+      if (!matchQuery) return false
+      if (statusFilter === 'abnormal') return accountHealthMap[a.id] === 'abnormal'
+      if (statusFilter === 'normal') return accountHealthMap[a.id] === 'normal' && a.status !== 'error' && a.status !== 'locked' && a.status !== 'blocked'
+      if (statusFilter === 'ok') return a.status === 'ok'
+      if (statusFilter === 'error') return a.status === 'error'
+      if (statusFilter === 'locked') return a.status === 'locked'
+      if (statusFilter === 'blocked') return a.status === 'blocked'
+      if (statusFilter === 'no_posts') return !cacheGet(`posts:${a.id}:10`, postsTTL)
+      if (statusFilter === 'no_insights') return !cacheGet(`insights:${a.id}`, insightsTTL)
+      return true
+    })
+
+    if (followersMin) result = result.filter(a => getFollowers(a) >= Number(followersMin))
+    if (followersMax) result = result.filter(a => { const f = getFollowers(a); return f >= 0 && f <= Number(followersMax) })
+
+    if (sortBy === 'newest') result.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
+    else if (sortBy === 'oldest') result.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0))
+    else if (sortBy === 'followers_desc') result.sort((a, b) => getFollowers(b) - getFollowers(a))
+    else if (sortBy === 'followers_asc') result.sort((a, b) => getFollowers(a) - getFollowers(b))
+
+    return result
+  }, [accountsWithTokenCheck, accountHealthMap, query, statusFilter, sortBy, followersMin, followersMax, settings, followersBaseline])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / perPage))
   const safeP = Math.min(page, totalPages)
   const paged = filtered.slice((safeP - 1) * perPage, safeP * perPage)
 
-  useEffect(() => { setPage(1) }, [statusFilter, query])
+  useEffect(() => { setPage(1) }, [statusFilter, query, sortBy, followersMin, followersMax])
 
   const handleAdd = async (e) => {
     e?.preventDefault?.()
@@ -292,11 +322,12 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
         token: token.trim(),
         status: 'ok',
         lastCheck: Date.now(),
+        addedAt: Date.now(),
         error: '',
       }
       setAccounts(prev => {
         const exists = prev.some(a => a.username === info.username)
-        if (exists) return prev.map(a => a.username === info.username ? next : a)
+        if (exists) return prev.map(a => a.username === info.username ? { ...next, addedAt: a.addedAt || next.addedAt } : a)
         return [next, ...prev]
       })
       setToken('')
@@ -407,13 +438,14 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
           token: t,
           status: 'ok',
           lastCheck: Date.now(),
+          addedAt: Date.now(),
           error: '',
         }
         setAccounts(prev => {
           const exists = prev.some(a => a.username === info.username)
           if (exists) {
             setBulkLog(p => [...p, { token: t, ok: true, msg: `Cập nhật: @${info.username}` }])
-            return prev.map(a => a.username === info.username ? updated : a)
+            return prev.map(a => a.username === info.username ? { ...updated, addedAt: a.addedAt || updated.addedAt } : a)
           }
           setBulkLog(p => [...p, { token: t, ok: true, msg: `@${info.username}` }])
           return [updated, ...prev]
@@ -444,7 +476,7 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => { navigate('/'); setStatusFilter('all'); setQuery(''); setPage(1); setShowSettings(false); setShowBulk(false); setBulkText(''); setBulkLog([]) }}
+              onClick={() => { navigate('/'); setStatusFilter('all'); setSortBy('default'); setFollowersMin(''); setFollowersMax(''); setQuery(''); setPage(1); setShowSettings(false); setShowBulk(false); setBulkText(''); setBulkLog([]) }}
               className="p-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
               title="Trang chủ"
             >
@@ -500,6 +532,58 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
           <button onClick={() => setStatusFilter(f => f === 'abnormal' ? 'all' : 'abnormal')} className="text-left">
             <StatCard label="Bất thường" value={stats.abnormal} tone={`text-rose-500 ${statusFilter === 'abnormal' ? 'ring-2 ring-rose-500 rounded-2xl' : ''}`} icon={<AlertTriangle className="w-4 h-4" />} />
           </button>
+        </section>
+
+        <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900/50 p-4">
+          <div className="flex items-center gap-1.5 text-xs text-neutral-400"><Filter className="w-3.5 h-3.5" /> Lọc:</div>
+          <button
+            onClick={() => setStatusFilter(f => f === 'no_posts' ? 'all' : 'no_posts')}
+            className={`px-2.5 py-1 rounded-lg text-xs border ${statusFilter === 'no_posts' ? 'border-indigo-500 bg-indigo-500/10 text-indigo-400' : 'border-neutral-200 dark:border-neutral-800 text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'}`}
+          >
+            Chưa lấy posts ({stats.noPosts})
+          </button>
+          <button
+            onClick={() => setStatusFilter(f => f === 'no_insights' ? 'all' : 'no_insights')}
+            className={`px-2.5 py-1 rounded-lg text-xs border ${statusFilter === 'no_insights' ? 'border-indigo-500 bg-indigo-500/10 text-indigo-400' : 'border-neutral-200 dark:border-neutral-800 text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'}`}
+          >
+            Chưa lấy insights ({stats.noInsights})
+          </button>
+          <div className="w-px h-5 bg-neutral-200 dark:bg-neutral-800" />
+          <div className="flex items-center gap-1.5 text-xs text-neutral-400"><ArrowDownUp className="w-3.5 h-3.5" /> Sắp xếp:</div>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
+            className="px-2 py-1 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+          >
+            <option value="default">Mặc định</option>
+            <option value="newest">Mới nhất</option>
+            <option value="oldest">Cũ nhất</option>
+            <option value="followers_desc">Follow cao → thấp</option>
+            <option value="followers_asc">Follow thấp → cao</option>
+          </select>
+          <div className="w-px h-5 bg-neutral-200 dark:bg-neutral-800" />
+          <div className="flex items-center gap-1.5 text-xs text-neutral-400">Followers:</div>
+          <input
+            value={followersMin}
+            onChange={(e) => setFollowersMin(e.target.value.replace(/[^0-9]/g, ''))}
+            placeholder="Từ"
+            className="w-20 px-2 py-1 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none text-center"
+          />
+          <span className="text-xs text-neutral-400">—</span>
+          <input
+            value={followersMax}
+            onChange={(e) => setFollowersMax(e.target.value.replace(/[^0-9]/g, ''))}
+            placeholder="Đến"
+            className="w-20 px-2 py-1 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none text-center"
+          />
+          {(sortBy !== 'default' || followersMin || followersMax || statusFilter === 'no_posts' || statusFilter === 'no_insights') && (
+            <button
+              onClick={() => { setSortBy('default'); setFollowersMin(''); setFollowersMax(''); if (statusFilter === 'no_posts' || statusFilter === 'no_insights') setStatusFilter('all') }}
+              className="px-2 py-1 rounded-lg text-xs text-rose-400 border border-rose-500/30 hover:bg-rose-500/10"
+            >
+              Xóa bộ lọc
+            </button>
+          )}
         </section>
 
         <section className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900/50 p-5">
@@ -569,10 +653,11 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
                   onClick={() => setStatusFilter('all')}
                   className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
                     statusFilter === 'abnormal' || statusFilter === 'error' || statusFilter === 'locked' || statusFilter === 'blocked' ? 'bg-rose-100 dark:bg-rose-500/20 text-rose-600 dark:text-rose-400'
+                    : statusFilter === 'no_posts' || statusFilter === 'no_insights' ? 'bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400'
                     : 'bg-emerald-100 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400'
                   }`}
                 >
-                  {{ all: 'Tổng', ok: 'Hoạt động', error: 'Token die', locked: 'Bị khoá', blocked: 'Bị block', normal: 'Bình thường', abnormal: 'Bất thường' }[statusFilter]}
+                  {{ all: 'Tổng', ok: 'Hoạt động', error: 'Token die', locked: 'Bị khoá', blocked: 'Bị block', normal: 'Bình thường', abnormal: 'Bất thường', no_posts: 'Chưa lấy posts', no_insights: 'Chưa lấy insights' }[statusFilter]}
                   <X className="w-3 h-3" />
                 </button>
               )}
