@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root { height: 100%; }
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+}
+
+/* Light mode: chữ đậm hơn, tối hơn để dễ đọc */
+html:not(.dark) .text-neutral-400 { color: rgb(82 82 82) !important; }
+html:not(.dark) .text-neutral-500 { color: rgb(64 64 64) !important; }
+html:not(.dark) .text-neutral-600 { color: rgb(38 38 38) !important; }
+html:not(.dark) p, html:not(.dark) span, html:not(.dark) label, html:not(.dark) div {
+  font-weight: 450;
+}
+html:not(.dark) h1, html:not(.dark) h2, html:not(.dark) h3 {
+  font-weight: 700;
+  color: rgb(17 17 17);
+}
+html:not(.dark) .font-medium { font-weight: 600; }
+html:not(.dark) .text-xs { font-size: 12.5px; }
+html:not(.dark) .text-sm { font-size: 14.5px; }
+
+/* Placeholder dễ nhìn hơn */
+html:not(.dark) input::placeholder,
+html:not(.dark) textarea::placeholder {
+  color: rgb(115 115 115);
+}
+
+/* Số liệu lớn (StatCard) luôn đen đậm trong light mode */
+html:not(.dark) .text-2xl { color: rgb(17 17 17); font-weight: 700; }
+html:not(.dark) .text-lg { color: rgb(17 17 17); }
+
+/* Ghi đè text-neutral-200/300 (vốn dành cho dark) nếu chưa có dark: variant */
+html:not(.dark) .text-neutral-200,
+html:not(.dark) .text-neutral-300 { color: rgb(38 38 38); }
