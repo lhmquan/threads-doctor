@@ -1,5 +1,35 @@
 # Changelog — Threads Doctor
 
+## v0.8.0 — 2026-05-05
+
+### Electron Desktop App
+- Đóng gói thành file `.exe` (Windows installer) bằng Electron
+- Chạy độc lập, không cần terminal hay `npm run dev`
+- File `electron/main.cjs` — Electron main process
+- Build config trong `package.json` — target NSIS installer
+- Vite config `base: './'` để load đúng path trong Electron
+- Installer ~97 MB (bao gồm Chromium engine)
+
+### Phân biệt trạng thái lỗi
+- Tách 3 trạng thái: `locked` (avatar trắng), `error` (access deactivated), `blocked` (access blocked)
+- Dashboard có 7 filter: Tổng / Hoạt động / Token die / Bị khoá / Bị block / Bình thường / Bất thường
+- Mỗi trạng thái có icon và màu riêng: Lock (cam), X (đỏ), AlertTriangle (vàng)
+- ProfileView hiện đúng label cho từng trạng thái
+
+### Phân trang
+- Hiển thị 20 tài khoản/trang
+- Nút Previous/Next với icon ChevronLeft/ChevronRight
+- Text "Trang X/Y · N tài khoản"
+- Auto reset về trang 1 khi đổi filter hoặc search
+
+### Nút Refresh (Home)
+- Icon Home trên header
+- Click reset về trang chủ: xoá filter, xoá search, đóng settings, về trang 1
+
+### Sửa lỗi
+- Fix text delay trong bulk import hiện đúng giá trị từ settings (thay vì hardcode `1.5s`)
+- Fix Electron main.js lỗi ES module — đổi extension sang `.cjs`
+
 ## v0.7.0 — 2026-04-23
 
 ### Followers Delta Tracking

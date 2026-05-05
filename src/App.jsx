@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertTriangle, ArrowLeft, BarChart2, CheckCircle2, CheckSquare, Clock, ClipboardCopy, Database,
-  Download, ExternalLink, Image as ImageIcon, KeyRound, List, Lock, MessageSquare, Moon, Plus,
+  AlertTriangle, ArrowLeft, BarChart2, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, Clock, ClipboardCopy, Database,
+  Download, ExternalLink, Home, Image as ImageIcon, KeyRound, List, Lock, MessageSquare, Moon, Plus,
   RefreshCw, Search, Send, Settings, Sparkles, Square, Stethoscope, Sun, Trash2, TrendingDown, TrendingUp, User, X,
 } from 'lucide-react'
 import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetchReplies, fetchRepliesPage, postReply, resolveThreadsUrl, searchKeyword, maskToken } from './lib/threads.js'
@@ -177,6 +177,8 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
   useEffect(() => { saveSettings(settings) }, [settings])
 
   const [statusFilter, setStatusFilter] = useState('all')
+  const [page, setPage] = useState(1)
+  const perPage = 20
 
   const getDuplicateCaptions = (accountId) => {
     const posts = cacheGet(`posts:${accountId}:10`, (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000)
@@ -265,6 +267,12 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
     if (statusFilter === 'blocked') return a.status === 'blocked'
     return true
   })
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / perPage))
+  const safeP = Math.min(page, totalPages)
+  const paged = filtered.slice((safeP - 1) * perPage, safeP * perPage)
+
+  useEffect(() => { setPage(1) }, [statusFilter, query])
 
   const handleAdd = async (e) => {
     e?.preventDefault?.()
@@ -434,6 +442,13 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
           </div>
           <div className="flex items-center gap-2">
             <button
+              onClick={() => { navigate('/'); setStatusFilter('all'); setQuery(''); setPage(1); setShowSettings(false) }}
+              className="p-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
+              title="Trang chủ"
+            >
+              <Home className="w-4 h-4" />
+            </button>
+            <button
               onClick={toggleTheme}
               className="p-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
               title={dark ? 'Light mode' : 'Dark mode'}
@@ -538,6 +553,7 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
               bulkProgress={bulkProgress}
               onStart={handleBulkImport}
               onStop={() => { bulkAbort.current = true }}
+              bulkDelay={settings?.bulkDelay ?? 5}
             />
           )}
         </section>
@@ -641,7 +657,7 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
           )}
 
           <div className="grid md:grid-cols-2 gap-3">
-            {filtered.map(a => (
+            {paged.map(a => (
               <AccountCard
                 key={a.id}
                 account={a}
@@ -663,6 +679,28 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
               </div>
             )}
           </div>
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-center gap-3 mt-4">
+              <button
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={safeP <= 1}
+                className="p-2 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-800 disabled:opacity-30 text-sm"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="text-sm text-neutral-400">
+                Trang {safeP}/{totalPages} · {filtered.length} tài khoản
+              </span>
+              <button
+                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={safeP >= totalPages}
+                className="p-2 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-800 disabled:opacity-30 text-sm"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
         </section>
       </main>
 
@@ -1073,7 +1111,7 @@ function CacheSizeChip({ label, prefix, onClear }) {
   )
 }
 
-function BulkImportPanel({ bulkText, setBulkText, bulkRunning, bulkLog, bulkProgress, onStart, onStop }) {
+function BulkImportPanel({ bulkText, setBulkText, bulkRunning, bulkLog, bulkProgress, onStart, onStop, bulkDelay = 5 }) {
   const logRef = useRef(null)
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
@@ -1096,7 +1134,7 @@ function BulkImportPanel({ bulkText, setBulkText, bulkRunning, bulkLog, bulkProg
       </label>
       <div className="flex items-center justify-between">
         <span className="text-xs text-neutral-400 dark:text-neutral-500">
-          {lines} token{lines !== 1 ? 's' : ''} · xử lý tuần tự, delay 1.5s/token
+          {lines} token{lines !== 1 ? 's' : ''} · xử lý tuần tự, delay {bulkDelay}s/token
         </span>
         <div className="flex items-center gap-2">
           {bulkRunning && (
