@@ -1,5 +1,26 @@
 # Changelog — Threads Doctor
 
+## v0.10.1 — 2026-05-06
+
+### Scheduler Page + Chu kỳ nâng cao
+- Tách phần hẹn giờ sang route riêng `/scheduler`, vào từ nút `Hẹn giờ` trên header
+- Trang chính `/` tập trung quản lý tài khoản; scheduler nằm riêng để thao tác rõ ràng hơn
+- Mở rộng chu kỳ lặp: hỗ trợ `phút`, `giờ`, `ngày` (không chỉ phút)
+- Trạng thái lịch hiện tại hiển thị đúng đơn vị chu kỳ đã chọn
+
+### Cache behavior (xác nhận)
+- Mỗi lần lịch fetch posts chạy thành công vẫn ghi cache `posts:{id}:10` như fetch thủ công
+- Sau khi lịch chạy xong, stats/filter liên quan cache được cập nhật lại ngay
+
+## v0.10.0 — 2026-05-06
+
+### Hẹn giờ fetch posts
+- Thêm scheduler fetch posts cho 2 chế độ: hẹn 1 lần hoặc lặp theo chu kỳ phút
+- Cho phép chọn target `Selected` hoặc `All`, và **chốt snapshot danh sách account tại thời điểm bấm Lên lịch**
+- Thêm nút `Hủy lịch` để dừng lịch hiện tại trước khi tạo lịch mới
+- Thêm `logs` sau mỗi lần lịch chạy xong: thời gian chạy, số account, success/fail, thời lượng
+- Delay giữa các request khi scheduler chạy dùng setting riêng `Delay riêng (giây)`, không dùng chung `bulkDelay`
+
 ## v0.9.0 — 2026-05-05
 
 ### Bộ lọc & sắp xếp nâng cao
@@ -10,6 +31,12 @@
 - Toolbar lọc/sort nằm giữa StatCards và phần thêm tài khoản
 - Field `addedAt` lưu timestamp khi thêm tài khoản (giữ lại khi update token)
 - Nút Home reset đầy đủ: bao gồm sort, followers range
+- Sort mới/cũ dùng `lastCheck` làm fallback cho tài khoản cũ chưa có `addedAt`
+
+### Cập nhật stats tự động
+- Thêm `cacheTick` counter — tự động cập nhật stats khi fetch posts/insights
+- Stats "Chưa lấy posts/insights" cập nhật ngay sau khi fetch thủ công trên từng card
+- Không cần refresh trang để thấy thay đổi
 
 ## v0.8.3 — 2026-05-05
 

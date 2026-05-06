@@ -9,7 +9,7 @@ import { generateReply } from './lib/ai.js'
 import { parseThreadsUrl } from './lib/threads-url.js'
 import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline } from './lib/storage.js'
 
-const APP_VERSION = '0.9.0'
+const APP_VERSION = '0.10.1'
 import { cacheClear, cacheGet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
 function useTheme() {
@@ -63,10 +63,10 @@ export default function Root() {
         : <ProfileView account={account} settings={settings} navigate={navigate} followersBaseline={followersBaseline} setFollowersBaseline={setFollowersBaseline} />
     }
   }
-  return <App navigate={navigate} dark={dark} toggleTheme={toggleTheme} followersBaseline={followersBaseline} setFollowersBaseline={setFollowersBaseline} />
+  return <App path={path} navigate={navigate} dark={dark} toggleTheme={toggleTheme} followersBaseline={followersBaseline} setFollowersBaseline={setFollowersBaseline} />
 }
 
-function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowersBaseline }) {
+function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFollowersBaseline }) {
   const [accounts, setAccounts] = useState(() => loadAccounts())
   const [settings, setSettings] = useState(() => loadSettings())
   const [showSettings, setShowSettings] = useState(false)
@@ -121,7 +121,149 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
   const [fetchPostsProgress, setFetchPostsProgress] = useState({ done: 0, total: 0 })
   const fetchPostsAbort = useRef(false)
 
+  const [scheduleMode, setScheduleMode] = useState('once')
+  const [scheduleAt, setScheduleAt] = useState('')
+  const [scheduleEveryValue, setScheduleEveryValue] = useState(settings?.scheduleDefaultRepeatValue ?? 10)
+  const [scheduleRepeatUnit, setScheduleRepeatUnit] = useState(settings?.scheduleDefaultRepeatUnit ?? 'minute')
+  const [scheduleTargetType, setScheduleTargetType] = useState('selected')
+  const [scheduleDelaySec, setScheduleDelaySec] = useState(settings?.scheduleDelaySec ?? 5)
+  const [scheduleMsg, setScheduleMsg] = useState('')
+  const [scheduledJob, setScheduledJob] = useState(null)
+  const [scheduledTargetIds, setScheduledTargetIds] = useState([])
+  const [scheduleRunning, setScheduleRunning] = useState(false)
+  const [scheduleLogs, setScheduleLogs] = useState([])
+  const scheduleTimeoutRef = useRef(null)
+  const scheduleIntervalRef = useRef(null)
+
   const [postsFetchTick, setPostsFetchTick] = useState(0)
+  const [cacheTick, setCacheTick] = useState(0)
+
+  const clearScheduledTimers = useCallback(() => {
+    if (scheduleTimeoutRef.current) {
+      clearTimeout(scheduleTimeoutRef.current)
+      scheduleTimeoutRef.current = null
+    }
+    if (scheduleIntervalRef.current) {
+      clearInterval(scheduleIntervalRef.current)
+      scheduleIntervalRef.current = null
+    }
+  }, [])
+
+  const runScheduledFetch = useCallback(async (snapshotIds, modeLabel) => {
+    if (scheduleRunning) return
+    setScheduleRunning(true)
+    const startedAt = Date.now()
+    const targets = accounts.filter(a => snapshotIds.includes(a.id))
+    const DELAY = Math.max(1, Number(scheduleDelaySec) || 5) * 1000
+    let ok = 0
+    let fail = 0
+
+    for (let i = 0; i < targets.length; i++) {
+      try {
+        await fetchPosts(targets[i].id, targets[i].token, { settings, limit: 10, skipCache: true })
+        ok++
+      } catch {
+        fail++
+      }
+      if (i < targets.length - 1) await new Promise(r => setTimeout(r, DELAY))
+    }
+
+    const endedAt = Date.now()
+    const durationSec = Math.round((endedAt - startedAt) / 1000)
+    setScheduleLogs(prev => [{
+      at: endedAt,
+      mode: modeLabel,
+      targetCount: targets.length,
+      success: ok,
+      fail,
+      durationSec,
+      status: fail > 0 ? 'partial' : 'ok',
+    }, ...prev].slice(0, 20))
+    setPostsFetchTick(t => t + 1)
+    setCacheTick(t => t + 1)
+    setScheduleRunning(false)
+  }, [accounts, scheduleDelaySec, scheduleRunning, settings])
+
+  const cancelSchedule = useCallback(() => {
+    clearScheduledTimers()
+    setScheduledJob(null)
+    setScheduledTargetIds([])
+    setScheduleMsg('Đã hủy lịch hiện tại')
+  }, [clearScheduledTimers])
+
+  const createSchedule = useCallback(() => {
+    setScheduleMsg('')
+    clearScheduledTimers()
+
+    const snapshotIds = scheduleTargetType === 'all'
+      ? accounts.map(a => a.id)
+      : [...selectedIds]
+
+    if (snapshotIds.length === 0) {
+      setScheduleMsg('Không có tài khoản để lên lịch')
+      return
+    }
+
+    const now = Date.now()
+    const delaySec = Math.max(1, Number(scheduleDelaySec) || 5)
+    const repeatValue = Math.max(1, Number(scheduleEveryValue) || 1)
+    const repeatUnit = ['minute', 'hour', 'day'].includes(scheduleRepeatUnit) ? scheduleRepeatUnit : 'minute'
+    setSettings(prev => ({
+      ...prev,
+      scheduleDelaySec: delaySec,
+      scheduleDefaultRepeatValue: repeatValue,
+      scheduleDefaultRepeatUnit: repeatUnit,
+    }))
+
+    if (scheduleMode === 'once') {
+      const runAt = new Date(scheduleAt).getTime()
+      if (!runAt || runAt <= now) {
+        setScheduleMsg('Thời điểm chạy không hợp lệ')
+        return
+      }
+      setScheduledTargetIds(snapshotIds)
+      setScheduledJob({
+        mode: 'once',
+        nextRunAt: runAt,
+        createdAt: now,
+        targetType: scheduleTargetType,
+      })
+      scheduleTimeoutRef.current = setTimeout(async () => {
+        await runScheduledFetch(snapshotIds, 'once')
+        clearScheduledTimers()
+        setScheduledJob(null)
+        setScheduledTargetIds([])
+      }, runAt - now)
+      setScheduleMsg(`Đã lên lịch 1 lần cho ${snapshotIds.length} tài khoản`)
+      return
+    }
+
+    const unitMs = repeatUnit === 'day' ? 24 * 60 * 60 * 1000 : repeatUnit === 'hour' ? 60 * 60 * 1000 : 60 * 1000
+    const intervalMs = repeatValue * unitMs
+    const nextRunAt = now + intervalMs
+    setScheduledTargetIds(snapshotIds)
+    setScheduledJob({
+      mode: 'repeat',
+      everyValue: repeatValue,
+      repeatUnit,
+      intervalMs,
+      nextRunAt,
+      createdAt: now,
+      targetType: scheduleTargetType,
+    })
+    scheduleIntervalRef.current = setInterval(async () => {
+      setScheduledJob(prev => prev ? { ...prev, nextRunAt: Date.now() + intervalMs } : prev)
+      await runScheduledFetch(snapshotIds, `repeat-${repeatUnit}`)
+    }, intervalMs)
+    const label = repeatUnit === 'day' ? 'ngày' : repeatUnit === 'hour' ? 'giờ' : 'phút'
+    setScheduleMsg(`Đã lên lịch lặp mỗi ${repeatValue} ${label} cho ${snapshotIds.length} tài khoản`)
+  }, [accounts, clearScheduledTimers, runScheduledFetch, scheduleAt, scheduleDelaySec, scheduleEveryValue, scheduleMode, scheduleRepeatUnit, scheduleTargetType, selectedIds, setSettings])
+
+  useEffect(() => {
+    return () => {
+      clearScheduledTimers()
+    }
+  }, [clearScheduledTimers])
 
   const fetchAllPosts = useCallback(async () => {
     const targets = accounts.filter(a => selectedIds.has(a.id))
@@ -142,6 +284,7 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
     }
     setFetchingAllPosts(false)
     setPostsFetchTick(t => t + 1)
+    setCacheTick(t => t + 1)
   }, [accounts, selectedIds, settings])
 
   const [fetchingAllInsights, setFetchingAllInsights] = useState(false)
@@ -166,6 +309,7 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
       }
     }
     setFetchingAllInsights(false)
+    setCacheTick(t => t + 1)
   }, [accounts, selectedIds, settings])
 
   const [confirmDelete, setConfirmDelete] = useState(null)
@@ -260,7 +404,7 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
     normal: accountsWithTokenCheck.filter(a => accountHealthMap[a.id] === 'normal' && a.status !== 'error' && a.status !== 'locked' && a.status !== 'blocked').length,
     noPosts: accountsWithTokenCheck.filter(a => !cacheGet(`posts:${a.id}:10`, (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000)).length,
     noInsights: accountsWithTokenCheck.filter(a => !cacheGet(`insights:${a.id}`, (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000)).length,
-  }), [accountsWithTokenCheck, accountHealthMap, settings])
+  }), [accountsWithTokenCheck, accountHealthMap, settings, cacheTick])
 
   const getFollowers = (a) => {
     const ins = cacheGet(`insights:${a.id}`, (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000)
@@ -292,13 +436,13 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
     if (followersMin) result = result.filter(a => getFollowers(a) >= Number(followersMin))
     if (followersMax) result = result.filter(a => { const f = getFollowers(a); return f >= 0 && f <= Number(followersMax) })
 
-    if (sortBy === 'newest') result.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
-    else if (sortBy === 'oldest') result.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0))
+    if (sortBy === 'newest') result.sort((a, b) => (b.addedAt || b.lastCheck || 0) - (a.addedAt || a.lastCheck || 0))
+    else if (sortBy === 'oldest') result.sort((a, b) => (a.addedAt || a.lastCheck || 0) - (b.addedAt || b.lastCheck || 0))
     else if (sortBy === 'followers_desc') result.sort((a, b) => getFollowers(b) - getFollowers(a))
     else if (sortBy === 'followers_asc') result.sort((a, b) => getFollowers(a) - getFollowers(b))
 
     return result
-  }, [accountsWithTokenCheck, accountHealthMap, query, statusFilter, sortBy, followersMin, followersMax, settings, followersBaseline])
+  }, [accountsWithTokenCheck, accountHealthMap, query, statusFilter, sortBy, followersMin, followersMax, settings, followersBaseline, cacheTick])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / perPage))
   const safeP = Math.min(page, totalPages)
@@ -490,6 +634,12 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
               {dark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
             <button
+              onClick={() => navigate('/scheduler')}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
+            >
+              <Clock className="w-4 h-4" /> Hẹn giờ
+            </button>
+            <button
               onClick={() => navigate('/interact')}
               className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-medium"
             >
@@ -645,7 +795,9 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
         </section>
 
         <section>
-          <div className="flex items-center justify-between mb-4">
+          {path !== '/scheduler' && (
+            <>
+              <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <h2 className="font-medium">Tài khoản ({filtered.length})</h2>
               {statusFilter !== 'all' && (
@@ -695,8 +847,8 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
             </div>
           </div>
 
-          {selectedIds.size > 0 && (
-            <div className="flex items-center gap-3 mb-4 p-3 rounded-xl border border-indigo-500/30 bg-indigo-500/5">
+            {selectedIds.size > 0 && (
+              <div className="flex items-center gap-3 mb-4 p-3 rounded-xl border border-indigo-500/30 bg-indigo-500/5">
               <span className="text-sm text-indigo-300">{selectedIds.size} đã chọn</span>
               <div className="flex-1" />
               <button
@@ -742,32 +894,172 @@ function App({ navigate, dark, toggleTheme, followersBaseline = {}, setFollowers
               </button>
             </div>
           )}
+          </>
+          )}
 
-          <div className="grid md:grid-cols-2 gap-3">
-            {paged.map(a => (
-              <AccountCard
-                key={a.id}
-                account={a}
-                settings={settings}
-                selected={selectedIds.has(a.id)}
-                onToggleSelect={() => toggleSelect(a.id)}
-                onRefresh={refreshOne}
-                onRemove={remove}
-                onOpen={(id) => navigate('/' + id)}
-                duplicateCaptions={getDuplicateCaptions(a.id)}
-                fetchTick={postsFetchTick}
-                followersBaseline={followersBaseline}
-                setFollowersBaseline={setFollowersBaseline}
-              />
-            ))}
-            {filtered.length === 0 && (
-              <div className="md:col-span-2 text-center text-sm text-neutral-400 dark:text-neutral-500 py-10 border border-dashed border-neutral-300 dark:border-neutral-800 rounded-xl">
-                Chưa có tài khoản nào. Thêm token ở trên để bắt đầu.
+          {path === '/scheduler' && (
+            <div className="mb-4 p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-medium text-amber-300">Hẹn giờ fetch posts</h3>
+                <div className="flex items-center gap-2">
+                  {scheduleRunning && <span className="text-xs text-indigo-300 inline-flex items-center gap-1"><RefreshCw className="w-3 h-3 animate-spin" /> Đang chạy lịch...</span>}
+                  <button
+                    onClick={() => navigate('/')}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-xs"
+                  >
+                    <Home className="w-3.5 h-3.5" /> Về trang chính
+                  </button>
+                </div>
               </div>
-            )}
-          </div>
 
-          {filtered.length > 0 && (
+              <div className="grid md:grid-cols-5 gap-2">
+                <label className="text-xs text-neutral-400">
+                  Chế độ
+                  <select
+                    value={scheduleMode}
+                    onChange={(e) => setScheduleMode(e.target.value)}
+                    className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                  >
+                    <option value="once">Hẹn 1 lần</option>
+                    <option value="repeat">Lặp theo chu kỳ</option>
+                  </select>
+                </label>
+
+                {scheduleMode === 'once' ? (
+                  <label className="text-xs text-neutral-400 md:col-span-2">
+                    Thời điểm chạy
+                    <input
+                      type="datetime-local"
+                      value={scheduleAt}
+                      onChange={(e) => setScheduleAt(e.target.value)}
+                      className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                    />
+                  </label>
+                ) : (
+                  <div className="md:col-span-2 grid grid-cols-2 gap-2">
+                    <label className="text-xs text-neutral-400">
+                      Chu kỳ
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={scheduleEveryValue}
+                        onChange={(e) => setScheduleEveryValue(e.target.value)}
+                        className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                      />
+                    </label>
+                    <label className="text-xs text-neutral-400">
+                      Đơn vị
+                      <select
+                        value={scheduleRepeatUnit}
+                        onChange={(e) => setScheduleRepeatUnit(e.target.value)}
+                        className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                      >
+                        <option value="minute">Phút</option>
+                        <option value="hour">Giờ</option>
+                        <option value="day">Ngày</option>
+                      </select>
+                    </label>
+                  </div>
+                )}
+
+                <label className="text-xs text-neutral-400">
+                  Target
+                  <select
+                    value={scheduleTargetType}
+                    onChange={(e) => setScheduleTargetType(e.target.value)}
+                    className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                  >
+                    <option value="selected">Selected</option>
+                    <option value="all">All</option>
+                  </select>
+                </label>
+
+                <label className="text-xs text-neutral-400">
+                  Delay riêng (giây)
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={scheduleDelaySec}
+                    onChange={(e) => setScheduleDelaySec(e.target.value)}
+                    className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                  />
+                </label>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={createSchedule}
+                  disabled={scheduleRunning}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-xs font-medium text-neutral-900"
+                >
+                  <Clock className="w-3.5 h-3.5" /> Lên lịch
+                </button>
+                <button
+                  onClick={cancelSchedule}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-800 text-rose-400 hover:bg-rose-500/10 text-xs"
+                >
+                  <X className="w-3.5 h-3.5" /> Hủy lịch
+                </button>
+                {scheduleMsg && <span className="text-xs text-neutral-300">{scheduleMsg}</span>}
+              </div>
+
+              {scheduledJob && (
+                <div className="text-xs text-neutral-300 rounded-lg border border-neutral-200 dark:border-neutral-800 px-3 py-2">
+                  Lịch hiện tại: <strong>{scheduledJob.mode === 'once' ? '1 lần' : `Lặp mỗi ${scheduledJob.everyValue} ${scheduledJob.repeatUnit === 'day' ? 'ngày' : scheduledJob.repeatUnit === 'hour' ? 'giờ' : 'phút'}`}</strong> ·
+                  target <strong>{scheduledJob.targetType === 'all' ? 'All' : 'Selected'}</strong> ·
+                  snapshot <strong>{scheduledTargetIds.length}</strong> account ·
+                  lần chạy kế tiếp: <strong>{new Date(scheduledJob.nextRunAt).toLocaleString()}</strong>
+                </div>
+              )}
+
+              <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-2">
+                <div className="text-xs text-neutral-400 mb-1">Logs lịch chạy (mới nhất)</div>
+                {scheduleLogs.length === 0 ? (
+                  <div className="text-xs text-neutral-500">Chưa có log</div>
+                ) : (
+                  <div className="space-y-1 max-h-36 overflow-y-auto">
+                    {scheduleLogs.map((l, i) => (
+                      <div key={i} className="text-xs font-mono text-neutral-300 flex items-center justify-between gap-2">
+                        <span>{new Date(l.at).toLocaleString()} · {l.mode} · {l.targetCount} acc</span>
+                        <span className={l.fail > 0 ? 'text-amber-300' : 'text-emerald-300'}>ok {l.success} / fail {l.fail} · {l.durationSec}s</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {path !== '/scheduler' && (
+            <div className="grid md:grid-cols-2 gap-3">
+              {paged.map(a => (
+                <AccountCard
+                  key={a.id}
+                  account={a}
+                  settings={settings}
+                  selected={selectedIds.has(a.id)}
+                  onToggleSelect={() => toggleSelect(a.id)}
+                  onRefresh={refreshOne}
+                  onRemove={remove}
+                  onOpen={(id) => navigate('/' + id)}
+                  duplicateCaptions={getDuplicateCaptions(a.id)}
+                  fetchTick={postsFetchTick}
+                  followersBaseline={followersBaseline}
+                  setFollowersBaseline={setFollowersBaseline}
+                  onCacheChange={() => setCacheTick(t => t + 1)}
+                />
+              ))}
+              {filtered.length === 0 && (
+                <div className="md:col-span-2 text-center text-sm text-neutral-400 dark:text-neutral-500 py-10 border border-dashed border-neutral-300 dark:border-neutral-800 rounded-xl">
+                  Chưa có tài khoản nào. Thêm token ở trên để bắt đầu.
+                </div>
+              )}
+            </div>
+          )}
+
+          {path !== '/scheduler' && filtered.length > 0 && (
             <div className="flex items-center justify-center gap-3 mt-4">
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
@@ -1318,7 +1610,7 @@ function formatNum(n) {
   return String(n)
 }
 
-function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, onRemove, onOpen, duplicateCaptions = [], fetchTick = 0, followersBaseline = {}, setFollowersBaseline }) {
+function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, onRemove, onOpen, duplicateCaptions = [], fetchTick = 0, followersBaseline = {}, setFollowersBaseline, onCacheChange }) {
   const a = account
   const loading = a.status === 'loading'
   const isErr = a.status === 'error' || a.status === 'locked' || a.status === 'blocked'
@@ -1351,7 +1643,7 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
       }
     } catch {
       setInsights(null)
-    } finally { setFetchingInsights(false) }
+    } finally { setFetchingInsights(false); onCacheChange?.() }
   }
 
   const handleGetRecent = async () => {
@@ -1361,7 +1653,7 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
       setLastPostTime(posts.length > 0 ? posts[0].timestamp : null)
     } catch {
       setLastPostTime(null)
-    } finally { setFetching(false) }
+    } finally { setFetching(false); onCacheChange?.() }
   }
 
   const [fetchingPosts, setFetchingPosts] = useState(false)
@@ -1371,7 +1663,7 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
       const posts = await fetchPosts(a.id, a.token, { settings, limit: 10, skipCache: true })
       setLastPostTime(posts.length > 0 ? posts[0].timestamp : null)
     } catch {}
-    finally { setFetchingPosts(false) }
+    finally { setFetchingPosts(false); onCacheChange?.() }
   }
 
   const renderLastPost = () => {
