@@ -7,11 +7,12 @@ import {
 import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetchReplies, fetchRepliesPage, postReply, resolveThreadsUrl, searchKeyword, maskToken } from './lib/threads.js'
 import { generateReply } from './lib/ai.js'
 import { parseThreadsUrl } from './lib/threads-url.js'
-import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline, loadSchedules, saveSchedules, loadScheduleLogs, saveScheduleLogs } from './lib/storage.js'
+import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline, loadSchedules, saveSchedules, loadScheduleLogs, saveScheduleLogs, loadAppLogs, saveAppLogs } from './lib/storage.js'
 import { cacheClear, cacheGet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
-const APP_VERSION = '0.11.4'
+const APP_VERSION = '0.12.0'
 const MAX_SCHEDULE_LOGS = 200
+const MAX_APP_LOGS = 1500
 
 function useTheme() {
   const [dark, setDark] = useState(() => {
@@ -145,6 +146,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const [editingScheduleId, setEditingScheduleId] = useState(null)
   const [scheduledTasks, setScheduledTasks] = useState(() => loadSchedules())
   const [scheduleLogs, setScheduleLogs] = useState(() => loadScheduleLogs().slice(0, MAX_SCHEDULE_LOGS))
+  const [appLogs, setAppLogs] = useState(() => loadAppLogs().slice(0, MAX_APP_LOGS))
   const timersRef = useRef(new Map())
   const taskRunLockRef = useRef(new Set())
   const runTaskRef = useRef(null)
@@ -193,6 +195,20 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
 
   const appendScheduleLog = useCallback((entry) => {
     setScheduleLogs(prev => [{ id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, ...entry }, ...prev].slice(0, MAX_SCHEDULE_LOGS))
+  }, [])
+
+  const appendAppLog = useCallback((entry) => {
+    const now = Date.now()
+    const id = `app_log_${now}_${Math.random().toString(36).slice(2, 7)}`
+    setAppLogs(prev => [{
+      id,
+      at: entry?.at || now,
+      level: entry?.level || 'info',
+      source: entry?.source || 'system',
+      action: entry?.action || 'event',
+      message: entry?.message || '',
+      meta: entry?.meta || null,
+    }, ...prev].slice(0, MAX_APP_LOGS))
   }, [])
 
   const armTask = useCallback((task) => {
@@ -273,6 +289,14 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       durationSec,
       status: runStatus,
     })
+    appendAppLog({
+      at: endedAt,
+      level: fail > 0 ? 'warn' : 'info',
+      source: 'scheduler',
+      action: 'run',
+      message: `Scheduler run ${runStatus}: ok ${ok} / fail ${fail}`,
+      meta: { taskId, targetCount: targets.length, durationSec, mode: taskSnapshot.mode },
+    })
 
     setPostsFetchTick(t => t + 1)
     setCacheTick(t => t + 1)
@@ -284,7 +308,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     }
 
     taskRunLockRef.current.delete(taskId)
-  }, [accounts, appendScheduleLog, armTask, clearTaskTimer, scheduledTasks, settings, calcNextDailyRunAt])
+  }, [accounts, appendAppLog, appendScheduleLog, armTask, clearTaskTimer, scheduledTasks, settings, calcNextDailyRunAt])
 
   useEffect(() => {
     runTaskRef.current = runTask
@@ -297,8 +321,15 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       : t
     ))
     appendScheduleLog({ at: Date.now(), taskId, type: 'cancel', message: 'Đã hủy lịch bởi người dùng' })
+    appendAppLog({
+      level: 'warn',
+      source: 'scheduler',
+      action: 'cancel',
+      message: 'Đã hủy lịch chạy',
+      meta: { taskId },
+    })
     setScheduleMsg('Đã hủy 1 lịch')
-  }, [appendScheduleLog, clearTaskTimer])
+  }, [appendAppLog, appendScheduleLog, clearTaskTimer])
 
   const deleteCancelledScheduleTask = useCallback((taskId) => {
     const target = scheduledTasks.find(t => t.id === taskId)
@@ -308,9 +339,16 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     }
     setScheduledTasks(prev => prev.filter(t => t.id !== taskId))
     appendScheduleLog({ at: Date.now(), taskId, type: 'delete', message: 'Đã xóa lịch đã hủy' })
+    appendAppLog({
+      level: 'info',
+      source: 'scheduler',
+      action: 'delete_cancelled',
+      message: 'Đã xóa lịch cancelled',
+      meta: { taskId },
+    })
     if (editingScheduleId === taskId) setEditingScheduleId(null)
     setScheduleMsg('Đã xóa 1 lịch đã hủy')
-  }, [appendScheduleLog, editingScheduleId, scheduledTasks])
+  }, [appendAppLog, appendScheduleLog, editingScheduleId, scheduledTasks])
 
   const resetScheduleForm = useCallback(() => {
     setEditingScheduleId(null)
@@ -466,6 +504,13 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     if (editingTask) {
       setScheduledTasks(prev => prev.map(t => t.id === task.id ? task : t))
       appendScheduleLog({ at: Date.now(), taskId: task.id, type: 'update', message: 'Cập nhật lịch thành công' })
+      appendAppLog({
+        level: 'info',
+        source: 'scheduler',
+        action: 'update',
+        message: 'Đã cập nhật lịch chạy',
+        meta: { taskId: task.id, mode: task.mode, targetCount: snapshotIds.length },
+      })
       clearTaskTimer(task.id)
       armTask(task)
       setEditingScheduleId(null)
@@ -474,8 +519,15 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
 
     setScheduledTasks(prev => [task, ...prev].slice(0, 100))
     appendScheduleLog({ at: Date.now(), taskId: task.id, type: 'create', message: 'Tạo lịch mới thành công' })
+    appendAppLog({
+      level: 'info',
+      source: 'scheduler',
+      action: 'create',
+      message: 'Đã tạo lịch chạy mới',
+      meta: { taskId: task.id, mode: task.mode, targetCount: snapshotIds.length },
+    })
     armTask(task)
-  }, [accounts, appendScheduleLog, armTask, clearTaskTimer, editingScheduleId, scheduleAt, scheduleDailyHour, scheduleDailyMinute, scheduleDailySecond, scheduleDelaySec, scheduleEveryValue, scheduleMode, scheduleRepeatUnit, scheduleTargetType, scheduledTasks, selectedIds, setSettings])
+  }, [accounts, appendAppLog, appendScheduleLog, armTask, clearTaskTimer, editingScheduleId, scheduleAt, scheduleDailyHour, scheduleDailyMinute, scheduleDailySecond, scheduleDelaySec, scheduleEveryValue, scheduleMode, scheduleRepeatUnit, scheduleTargetType, scheduledTasks, selectedIds, setSettings])
 
   useEffect(() => {
     saveSchedules(scheduledTasks)
@@ -484,6 +536,10 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   useEffect(() => {
     saveScheduleLogs(scheduleLogs)
   }, [scheduleLogs])
+
+  useEffect(() => {
+    saveAppLogs(appLogs)
+  }, [appLogs])
 
   useEffect(() => {
     const now = Date.now()
@@ -544,26 +600,45 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const fetchAllPosts = useCallback(async () => {
     const targets = accounts.filter(a => selectedIds.has(a.id))
     if (targets.length === 0) return
+    appendAppLog({
+      level: 'info',
+      source: 'posts',
+      action: 'bulk_fetch_start',
+      message: `Bắt đầu lấy posts cho ${targets.length} tài khoản`,
+      meta: { total: targets.length },
+    })
     setFetchingAllPosts(true)
     setFetchPostsProgress({ done: 0, total: targets.length })
     fetchPostsAbort.current = false
     const DELAY = (settings?.bulkDelay ?? 5) * 1000
+    let ok = 0
+    let fail = 0
     for (let i = 0; i < targets.length; i++) {
       if (fetchPostsAbort.current) break
       try {
         await fetchPosts(targets[i].id, targets[i].token, { settings, limit: 10, skipCache: true })
-      } catch {}
+        ok++
+      } catch {
+        fail++
+      }
       setFetchPostsProgress({ done: i + 1, total: targets.length })
       if (i < targets.length - 1 && !fetchPostsAbort.current) {
         await new Promise(r => setTimeout(r, DELAY))
       }
     }
+    appendAppLog({
+      level: fail > 0 ? 'warn' : 'info',
+      source: 'posts',
+      action: fetchPostsAbort.current ? 'bulk_fetch_stopped' : 'bulk_fetch_finish',
+      message: `Lấy posts hàng loạt xong: ok ${ok} / fail ${fail}`,
+      meta: { total: targets.length },
+    })
     setFetchingAllPosts(false)
     setSelectedBySelectAll(false)
     setSelectedIds(new Set())
     setPostsFetchTick(t => t + 1)
     setCacheTick(t => t + 1)
-  }, [accounts, selectedIds, settings])
+  }, [accounts, appendAppLog, selectedIds, settings])
 
   const [fetchingAllInsights, setFetchingAllInsights] = useState(false)
   const [fetchInsightsProgress, setFetchInsightsProgress] = useState({ done: 0, total: 0 })
@@ -572,25 +647,44 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const fetchAllInsights = useCallback(async () => {
     const targets = accounts.filter(a => selectedIds.has(a.id))
     if (targets.length === 0) return
+    appendAppLog({
+      level: 'info',
+      source: 'insights',
+      action: 'bulk_fetch_start',
+      message: `Bắt đầu lấy insights cho ${targets.length} tài khoản`,
+      meta: { total: targets.length },
+    })
     setFetchingAllInsights(true)
     setFetchInsightsProgress({ done: 0, total: targets.length })
     fetchInsightsAbort.current = false
     const DELAY = (settings?.bulkDelay ?? 5) * 1000
+    let ok = 0
+    let fail = 0
     for (let i = 0; i < targets.length; i++) {
       if (fetchInsightsAbort.current) break
       try {
         await fetchInsights(targets[i].id, targets[i].token, { settings })
-      } catch {}
+        ok++
+      } catch {
+        fail++
+      }
       setFetchInsightsProgress({ done: i + 1, total: targets.length })
       if (i < targets.length - 1 && !fetchInsightsAbort.current) {
         await new Promise(r => setTimeout(r, DELAY))
       }
     }
+    appendAppLog({
+      level: fail > 0 ? 'warn' : 'info',
+      source: 'insights',
+      action: fetchInsightsAbort.current ? 'bulk_fetch_stopped' : 'bulk_fetch_finish',
+      message: `Lấy insights hàng loạt xong: ok ${ok} / fail ${fail}`,
+      meta: { total: targets.length },
+    })
     setFetchingAllInsights(false)
     setSelectedBySelectAll(false)
     setSelectedIds(new Set())
     setCacheTick(t => t + 1)
-  }, [accounts, selectedIds, settings])
+  }, [accounts, appendAppLog, selectedIds, settings])
 
   const [confirmDelete, setConfirmDelete] = useState(null)
   const [confirmBulkAction, setConfirmBulkAction] = useState(null)
@@ -734,6 +828,19 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     setPage(1)
   }, [statusFilter, query, sortBy, followersMin, followersMax])
 
+  const appLogsBytes = useMemo(() => {
+    try {
+      return new Blob([JSON.stringify(appLogs)]).size
+    } catch {
+      return 0
+    }
+  }, [appLogs])
+
+  const clearAppLogs = useCallback(() => {
+    setAppLogs([])
+    setScheduleMsg('Đã xóa toàn bộ app logs')
+  }, [])
+
   const handleAdd = async (e) => {
     e?.preventDefault?.()
     setAddError('')
@@ -758,8 +865,21 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
         if (exists) return prev.map(a => a.username === info.username ? { ...next, addedAt: a.addedAt || next.addedAt } : a)
         return [next, ...prev]
       })
+      appendAppLog({
+        level: 'info',
+        source: 'account',
+        action: 'add',
+        message: `Đã thêm/cập nhật tài khoản @${info.username}`,
+        meta: { id: info.id },
+      })
       setToken('')
     } catch (err) {
+      appendAppLog({
+        level: 'error',
+        source: 'account',
+        action: 'add_fail',
+        message: err.message || 'Không thêm được tài khoản',
+      })
       setAddError(err.message || 'Không lấy được thông tin tài khoản')
     } finally {
       setAdding(false)
@@ -782,7 +902,21 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
         error: '',
         lastCheck: Date.now(),
       } : a))
+      appendAppLog({
+        level: 'info',
+        source: 'account',
+        action: 'refresh',
+        message: `Đã refresh tài khoản @${info.username}`,
+        meta: { id },
+      })
     } catch (err) {
+      appendAppLog({
+        level: 'warn',
+        source: 'account',
+        action: 'refresh_fail',
+        message: err.message || 'Refresh tài khoản thất bại',
+        meta: { id },
+      })
       setAccounts(prev => prev.map(a => a.id === id ? {
         ...a, status: 'error', error: err.message, lastCheck: Date.now(),
       } : a))
@@ -842,6 +976,13 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
 
     removedAccounts.forEach(clearAccountCache)
     if (removedAccounts.length > 0) {
+      appendAppLog({
+        level: 'warn',
+        source: 'account',
+        action: 'remove',
+        message: `Đã xóa ${removedAccounts.length} tài khoản`,
+        meta: { ids: removedAccounts.map(a => a.id) },
+      })
       setFollowersBaseline(prev => {
         const next = { ...prev }
         let changed = false
@@ -862,8 +1003,17 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
 
   const [refreshingAll, setRefreshingAll] = useState(false)
   const refreshAll = useCallback(async () => {
+    appendAppLog({
+      level: 'info',
+      source: 'account',
+      action: 'refresh_all_start',
+      message: `Bắt đầu refresh ${accounts.length} tài khoản`,
+      meta: { total: accounts.length },
+    })
     setRefreshingAll(true)
     const DELAY = (settings?.bulkDelay ?? 5) * 1000
+    let ok = 0
+    let fail = 0
     for (let i = 0; i < accounts.length; i++) {
       const acc = accounts[i]
       setAccounts(prev => prev.map(a => a.id === acc.id ? { ...a, status: 'loading' } : a))
@@ -879,15 +1029,24 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           error: '',
           lastCheck: Date.now(),
         } : a))
+        ok++
       } catch (err) {
         setAccounts(prev => prev.map(a => a.id === acc.id ? {
           ...a, status: 'error', error: err.message, lastCheck: Date.now(),
         } : a))
+        fail++
       }
       if (i < accounts.length - 1) await new Promise(r => setTimeout(r, DELAY))
     }
+    appendAppLog({
+      level: fail > 0 ? 'warn' : 'info',
+      source: 'account',
+      action: 'refresh_all_finish',
+      message: `Refresh all xong: ok ${ok} / fail ${fail}`,
+      meta: { total: accounts.length },
+    })
     setRefreshingAll(false)
-  }, [accounts, settings])
+  }, [accounts, appendAppLog, settings])
 
   const handleBulkImport = useCallback(async () => {
     const tokens = bulkText
@@ -896,6 +1055,13 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       .filter(Boolean)
       .filter((v, i, a) => a.indexOf(v) === i)
     if (tokens.length === 0) return
+    appendAppLog({
+      level: 'info',
+      source: 'bulk_import',
+      action: 'start',
+      message: `Bắt đầu nạp hàng loạt ${tokens.length} token`,
+      meta: { total: tokens.length },
+    })
     setBulkRunning(true)
     setBulkLog([])
     setBulkProgress({ done: 0, total: tokens.length })
@@ -906,6 +1072,13 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     for (let i = 0; i < tokens.length; i++) {
       if (bulkAbort.current) {
         setBulkLog(prev => [...prev, { token: tokens[i], ok: false, msg: 'Đã dừng bởi người dùng' }])
+        appendAppLog({
+          level: 'warn',
+          source: 'bulk_import',
+          action: 'stopped',
+          message: 'Nạp hàng loạt bị dừng bởi người dùng',
+          meta: { at: i, total: tokens.length },
+        })
         break
       }
       const t = tokens[i]
@@ -932,16 +1105,37 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           setBulkLog(p => [...p, { token: t, ok: true, msg: `@${info.username}` }])
           return [updated, ...prev]
         })
+        appendAppLog({
+          level: 'info',
+          source: 'bulk_import',
+          action: 'item_ok',
+          message: `Nạp token thành công cho @${info.username}`,
+          meta: { id: info.id, index: i + 1, total: tokens.length },
+        })
       } catch (err) {
         setBulkLog(prev => [...prev, { token: t, ok: false, msg: err.message }])
+        appendAppLog({
+          level: 'warn',
+          source: 'bulk_import',
+          action: 'item_fail',
+          message: err.message || 'Nạp token thất bại',
+          meta: { index: i + 1, total: tokens.length },
+        })
       }
       setBulkProgress({ done: i + 1, total: tokens.length })
       if (i < tokens.length - 1 && !bulkAbort.current) {
         await new Promise(r => setTimeout(r, DELAY))
       }
     }
+    appendAppLog({
+      level: 'info',
+      source: 'bulk_import',
+      action: 'finish',
+      message: 'Hoàn tất phiên nạp hàng loạt',
+      meta: { total: tokens.length },
+    })
     setBulkRunning(false)
-  }, [bulkText, settings])
+  }, [appendAppLog, bulkText, settings])
 
   const confirmBulkImport = useCallback(() => {
     const tokens = bulkText
@@ -1038,6 +1232,12 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
               <Clock className="w-4 h-4" /> Hẹn giờ
             </button>
             <button
+              onClick={() => navigate('/logs')}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
+            >
+              <List className="w-4 h-4" /> Logs
+            </button>
+            <button
               onClick={() => navigate('/interact')}
               className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-medium"
             >
@@ -1058,6 +1258,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           <SettingsPanel settings={settings} setSettings={setSettings} />
         )}
 
+        {path !== '/logs' && (
+          <>
         <section className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-4">
           <button onClick={() => setStatusFilter('all')} className="text-left">
             <StatCard label="Tổng" value={stats.total} tone="text-neutral-700 dark:text-neutral-200" icon={<User className="w-4 h-4" />} />
@@ -1191,9 +1393,11 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
             />
           )}
         </section>
+          </>
+        )}
 
         <section>
-          {path !== '/scheduler' && (
+          {path !== '/scheduler' && path !== '/logs' && (
             <>
               <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -1293,6 +1497,52 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
             </div>
           )}
           </>
+          )}
+
+          {path === '/logs' && (
+            <div className="mb-4 p-4 rounded-xl border border-indigo-500/30 bg-indigo-500/5 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-medium text-indigo-300">Logs toàn tool</h3>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => navigate('/')}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-xs"
+                  >
+                    <Home className="w-3.5 h-3.5" /> Về trang chính
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-300">
+                <span className="px-2 py-1 rounded border border-neutral-700">Tổng logs: {appLogs.length}</span>
+                <span className="px-2 py-1 rounded border border-neutral-700">Dung lượng: {formatBytes(appLogsBytes)}</span>
+                <button
+                  onClick={() => clearAppLogs()}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-rose-800 text-rose-400 hover:bg-rose-500/10"
+                >
+                  <Trash2 className="w-3.5 h-3.5" /> Clear logs
+                </button>
+              </div>
+
+              <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-2">
+                {appLogs.length === 0 ? (
+                  <div className="text-xs text-neutral-500">Chưa có app log</div>
+                ) : (
+                  <div className="space-y-1 max-h-[55vh] overflow-y-auto">
+                    {appLogs.map((l) => (
+                      <div key={l.id} className="text-xs font-mono text-neutral-300 rounded px-2 py-1 border border-neutral-800/70">
+                        <div className="flex items-center justify-between gap-2">
+                          <span>{new Date(l.at).toLocaleString()} · {l.source} · {l.action}</span>
+                          <span className={l.level === 'error' ? 'text-rose-400' : l.level === 'warn' ? 'text-amber-300' : 'text-emerald-300'}>{l.level}</span>
+                        </div>
+                        <div className="text-neutral-300 mt-0.5">{l.message}</div>
+                        {l.meta && <div className="text-neutral-500 mt-0.5 break-all">{JSON.stringify(l.meta)}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           )}
 
           {path === '/scheduler' && (
@@ -1569,7 +1819,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
             </div>
           )}
 
-          {path !== '/scheduler' && (
+          {path !== '/scheduler' && path !== '/logs' && (
             <div className="grid md:grid-cols-2 gap-3">
               {paged.map(a => (
                 <AccountCard
@@ -1596,7 +1846,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
             </div>
           )}
 
-          {path !== '/scheduler' && filtered.length > 0 && (
+          {path !== '/scheduler' && path !== '/logs' && filtered.length > 0 && (
             <div className="flex items-center justify-center gap-3 mt-4">
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}

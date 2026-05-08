@@ -1,5 +1,13 @@
 # Changelog — Threads Doctor
 
+## v0.12.0 — 2026-05-08
+
+### App Logs page (toàn tool)
+- Thêm route `/logs` + nút `Logs` trên header để theo dõi log toàn tool
+- Persist app logs vào localStorage (`td.app_logs.v1`) với giới hạn retention cố định (`MAX_APP_LOGS`)
+- Ghi log cho các luồng chính: scheduler (create/update/cancel/delete/run), bulk import, add/remove/refresh account, fetch posts/insights hàng loạt
+- Trang logs hiển thị tổng số bản ghi, dung lượng logs hiện tại và hỗ trợ `Clear logs`
+
 ## v0.11.4 — 2026-05-08
 
 ### Scheduler UX + Log retention
