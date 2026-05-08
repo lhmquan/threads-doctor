@@ -1,5 +1,67 @@
 # Changelog — Threads Doctor
 
+## v0.11.4 — 2026-05-08
+
+### Scheduler UX + Log retention
+- Thêm nút `Xóa` cho các lịch có trạng thái `cancelled`, giúp dọn danh sách lịch đã hủy
+- Giới hạn retention cho logs lịch bằng mức cố định (`MAX_SCHEDULE_LOGS`), áp dụng cả khi load và khi ghi log mới
+
+## v0.11.3 — 2026-05-07
+
+### Hotfix UI context menu
+- Fix lỗi UI bị kéo dãn ngang và menu nhấp nháy khi chuột phải trên card
+- Nguyên nhân từ hover `transform` trên AccountCard khi render context menu fixed; đã đổi hover sang shadow-only để ổn định layout
+
+## v0.11.2 — 2026-05-07
+
+### Hotfix context menu
+- Fix lỗi sau khi đã right-click vào account, right-click ở vùng khác vẫn có thể hiện menu không đúng ngữ cảnh
+- Chặn lan truyền sự kiện right-click để menu chỉ mở đúng khi thao tác trên AccountCard
+
+### UI polish
+- Thêm hiệu ứng hover nổi nhẹ cho AccountCard để thao tác trực quan hơn
+
+## v0.11.1 — 2026-05-07
+
+### Hotfix context menu
+- Fix lỗi menu chuột phải trên AccountCard có thể bị đóng ngay sau khi mở, khiến nhìn như không hiển thị
+- Điều chỉnh cơ chế đóng menu: giữ đóng bằng click overlay + phím `ESC`, tránh auto-close bởi listener global không cần thiết
+
+## v0.11.0 — 2026-05-07
+
+### Context menu trên tài khoản
+- Thêm menu chuột phải (right-click) trực tiếp trên từng AccountCard để thao tác nhanh
+- Menu hỗ trợ các action chính: Mở chi tiết, Chọn/Bỏ chọn, Refresh token, Lấy insights, Lấy posts, Xóa tài khoản
+- Đóng menu khi click ra ngoài hoặc nhấn `ESC`
+
+### Scheduler nâng cao
+- Thêm khả năng sửa lịch hiện có (Edit schedule) thay vì phải tạo lịch mới
+- Form scheduler hỗ trợ chế độ `Lưu chỉnh sửa` / `Hủy sửa`
+- Lịch lặp theo `ngày` hỗ trợ chọn thêm giờ/phút/giây cho thời điểm chạy
+
+### Dọn cache theo account khi xóa
+- Khi xóa tài khoản, tool xóa luôn cache liên quan account đó (`me`, `posts`, `insights`, `post`, `post_insights`, `replies`) để tránh tái dùng dữ liệu cũ khi add lại token
+
+## v0.10.4 — 2026-05-06
+
+### Multi Scheduler + Persist
+- Hẹn giờ hỗ trợ tạo nhiều tác vụ độc lập (không còn ghi đè 1 lịch duy nhất)
+- Mỗi tác vụ có nút `Hủy` riêng ngay trong danh sách lịch
+- Persist danh sách lịch + logs vào localStorage, sau khi cập nhật/restart app vẫn giữ lịch đã tạo
+- Rehydrate lịch active khi mở app: lịch lặp tiếp tục chạy theo `nextRunAt`, lịch one-time quá hạn xa sẽ tự hoàn tất
+
+## v0.10.3 — 2026-05-06
+
+### Live stats refresh
+- Fix cập nhật stats trạng thái ngay sau thao tác fetch posts/insights (đơn lẻ và hàng loạt), không cần restart hoặc chuyển trang
+- `accountHealthMap` đã phụ thuộc `cacheTick` để các chỉ số Bình thường/Bất thường và filter liên quan cache re-compute tức thì
+
+## v0.10.2 — 2026-05-06
+
+### Scheduler UX
+- Khi `Target = Selected`, sổ ra danh sách tài khoản kèm checkbox để chọn ngay trong trang `/scheduler` (kèm nút Chọn tất cả / Bỏ chọn, hiển thị `đã chọn X/Y`)
+- Ô `Delay riêng (giây)` chỉ hiện khi có ≥ 2 tài khoản trong target (Selected ≥ 2 hoặc All với accounts ≥ 2) — 1 tài khoản không cần delay
+
 ## v0.10.1 — 2026-05-06
 
 ### Scheduler Page + Chu kỳ nâng cao

@@ -7,10 +7,11 @@ import {
 import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetchReplies, fetchRepliesPage, postReply, resolveThreadsUrl, searchKeyword, maskToken } from './lib/threads.js'
 import { generateReply } from './lib/ai.js'
 import { parseThreadsUrl } from './lib/threads-url.js'
-import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline } from './lib/storage.js'
-
-const APP_VERSION = '0.10.1'
+import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline, loadSchedules, saveSchedules, loadScheduleLogs, saveScheduleLogs } from './lib/storage.js'
 import { cacheClear, cacheGet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
+
+const APP_VERSION = '0.11.4'
+const MAX_SCHEDULE_LOGS = 200
 
 function useTheme() {
   const [dark, setDark] = useState(() => {
@@ -109,13 +110,23 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const bulkAbort = useRef(false)
 
   const [selectedIds, setSelectedIds] = useState(new Set())
-  const toggleSelect = (id) => setSelectedIds(prev => {
-    const next = new Set(prev)
-    next.has(id) ? next.delete(id) : next.add(id)
-    return next
-  })
-  const selectAll = () => setSelectedIds(new Set(filtered.map(a => a.id)))
-  const selectNone = () => setSelectedIds(new Set())
+  const [selectedBySelectAll, setSelectedBySelectAll] = useState(false)
+  const toggleSelect = (id) => {
+    setSelectedBySelectAll(false)
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+  const selectAll = () => {
+    setSelectedBySelectAll(true)
+    setSelectedIds(new Set(filtered.map(a => a.id)))
+  }
+  const selectNone = () => {
+    setSelectedBySelectAll(false)
+    setSelectedIds(new Set())
+  }
 
   const [fetchingAllPosts, setFetchingAllPosts] = useState(false)
   const [fetchPostsProgress, setFetchPostsProgress] = useState({ done: 0, total: 0 })
@@ -125,36 +136,87 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const [scheduleAt, setScheduleAt] = useState('')
   const [scheduleEveryValue, setScheduleEveryValue] = useState(settings?.scheduleDefaultRepeatValue ?? 10)
   const [scheduleRepeatUnit, setScheduleRepeatUnit] = useState(settings?.scheduleDefaultRepeatUnit ?? 'minute')
+  const [scheduleDailyHour, setScheduleDailyHour] = useState(settings?.scheduleDefaultDailyHour ?? 9)
+  const [scheduleDailyMinute, setScheduleDailyMinute] = useState(settings?.scheduleDefaultDailyMinute ?? 0)
+  const [scheduleDailySecond, setScheduleDailySecond] = useState(settings?.scheduleDefaultDailySecond ?? 0)
   const [scheduleTargetType, setScheduleTargetType] = useState('selected')
   const [scheduleDelaySec, setScheduleDelaySec] = useState(settings?.scheduleDelaySec ?? 5)
   const [scheduleMsg, setScheduleMsg] = useState('')
-  const [scheduledJob, setScheduledJob] = useState(null)
-  const [scheduledTargetIds, setScheduledTargetIds] = useState([])
-  const [scheduleRunning, setScheduleRunning] = useState(false)
-  const [scheduleLogs, setScheduleLogs] = useState([])
-  const scheduleTimeoutRef = useRef(null)
-  const scheduleIntervalRef = useRef(null)
+  const [editingScheduleId, setEditingScheduleId] = useState(null)
+  const [scheduledTasks, setScheduledTasks] = useState(() => loadSchedules())
+  const [scheduleLogs, setScheduleLogs] = useState(() => loadScheduleLogs().slice(0, MAX_SCHEDULE_LOGS))
+  const timersRef = useRef(new Map())
+  const taskRunLockRef = useRef(new Set())
+  const runTaskRef = useRef(null)
 
   const [postsFetchTick, setPostsFetchTick] = useState(0)
   const [cacheTick, setCacheTick] = useState(0)
+  const schedulerTargetCount = scheduleTargetType === 'all' ? accounts.length : selectedIds.size
+  const showScheduleDelay = schedulerTargetCount >= 2
+  const scheduleRunning = scheduledTasks.some(t => t.status === 'running')
 
-  const clearScheduledTimers = useCallback(() => {
-    if (scheduleTimeoutRef.current) {
-      clearTimeout(scheduleTimeoutRef.current)
-      scheduleTimeoutRef.current = null
-    }
-    if (scheduleIntervalRef.current) {
-      clearInterval(scheduleIntervalRef.current)
-      scheduleIntervalRef.current = null
+  const clampNumber = (v, min, max, fallback = min) => {
+    const n = Number(v)
+    if (!Number.isFinite(n)) return fallback
+    return Math.min(max, Math.max(min, Math.floor(n)))
+  }
+
+  const calcNextDailyRunAt = (fromTs, everyDays, hour, minute, second) => {
+    const base = new Date(fromTs)
+    base.setMilliseconds(0)
+    base.setHours(hour, minute, second, 0)
+    if (base.getTime() > fromTs) return base.getTime()
+    base.setDate(base.getDate() + Math.max(1, everyDays))
+    return base.getTime()
+  }
+
+  const formatDateTimeLocal = (ts) => {
+    if (!ts) return ''
+    const d = new Date(ts)
+    if (!Number.isFinite(d.getTime())) return ''
+    const pad = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+
+  const clearTaskTimer = useCallback((taskId) => {
+    const timer = timersRef.current.get(taskId)
+    if (timer) {
+      clearTimeout(timer)
+      timersRef.current.delete(taskId)
     }
   }, [])
 
-  const runScheduledFetch = useCallback(async (snapshotIds, modeLabel) => {
-    if (scheduleRunning) return
-    setScheduleRunning(true)
+  const clearAllTaskTimers = useCallback(() => {
+    for (const timer of timersRef.current.values()) clearTimeout(timer)
+    timersRef.current.clear()
+  }, [])
+
+  const appendScheduleLog = useCallback((entry) => {
+    setScheduleLogs(prev => [{ id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, ...entry }, ...prev].slice(0, MAX_SCHEDULE_LOGS))
+  }, [])
+
+  const armTask = useCallback((task) => {
+    if (!task || task.status !== 'active' || !task.nextRunAt) return
+    clearTaskTimer(task.id)
+    const delay = Math.max(0, task.nextRunAt - Date.now())
+    const timer = setTimeout(() => {
+      runTaskRef.current?.(task.id)
+    }, delay)
+    timersRef.current.set(task.id, timer)
+  }, [clearTaskTimer])
+
+  const runTask = useCallback(async (taskId) => {
+    if (taskRunLockRef.current.has(taskId)) return
+
+    const taskSnapshot = scheduledTasks.find(t => t.id === taskId)
+    if (!taskSnapshot || taskSnapshot.status !== 'active') return
+
+    taskRunLockRef.current.add(taskId)
+    setScheduledTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'running', updatedAt: Date.now() } : t))
+
     const startedAt = Date.now()
-    const targets = accounts.filter(a => snapshotIds.includes(a.id))
-    const DELAY = Math.max(1, Number(scheduleDelaySec) || 5) * 1000
+    const targets = accounts.filter(a => taskSnapshot.snapshotIds.includes(a.id))
+    const DELAY = Math.max(1, Number(taskSnapshot.delaySec) || 5) * 1000
     let ok = 0
     let fail = 0
 
@@ -170,30 +232,129 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
 
     const endedAt = Date.now()
     const durationSec = Math.round((endedAt - startedAt) / 1000)
-    setScheduleLogs(prev => [{
+    const runStatus = fail > 0 ? (ok > 0 ? 'partial' : 'fail') : 'ok'
+
+    let taskAfter = null
+    setScheduledTasks(prev => prev.map(t => {
+      if (t.id !== taskId) return t
+      const nextBase = {
+        ...t,
+        updatedAt: endedAt,
+        lastRunAt: endedAt,
+        runCount: (t.runCount || 0) + 1,
+        lastResult: { ok, fail, durationSec, status: runStatus },
+      }
+      if (t.status === 'cancelled') {
+        taskAfter = nextBase
+        return nextBase
+      }
+      if (t.mode === 'once') {
+        taskAfter = { ...nextBase, status: 'completed', nextRunAt: null }
+        return taskAfter
+      }
+      const intervalMs = t.intervalMs || 60 * 1000
+      let nextRunAt = endedAt + intervalMs
+      if (t.repeatUnit === 'day' && Number.isFinite(t.dailyHour) && Number.isFinite(t.dailyMinute) && Number.isFinite(t.dailySecond)) {
+        nextRunAt = t.nextRunAt || calcNextDailyRunAt(endedAt, t.everyValue || 1, t.dailyHour, t.dailyMinute, t.dailySecond)
+        while (nextRunAt <= endedAt) nextRunAt += intervalMs
+      }
+      taskAfter = { ...nextBase, status: 'active', nextRunAt }
+      return taskAfter
+    }))
+
+    appendScheduleLog({
       at: endedAt,
-      mode: modeLabel,
+      taskId,
+      type: 'run',
+      mode: taskSnapshot.mode === 'repeat' ? `repeat-${taskSnapshot.repeatUnit || 'minute'}` : 'once',
       targetCount: targets.length,
       success: ok,
       fail,
       durationSec,
-      status: fail > 0 ? 'partial' : 'ok',
-    }, ...prev].slice(0, 20))
+      status: runStatus,
+    })
+
     setPostsFetchTick(t => t + 1)
     setCacheTick(t => t + 1)
-    setScheduleRunning(false)
-  }, [accounts, scheduleDelaySec, scheduleRunning, settings])
 
-  const cancelSchedule = useCallback(() => {
-    clearScheduledTimers()
-    setScheduledJob(null)
-    setScheduledTargetIds([])
-    setScheduleMsg('Đã hủy lịch hiện tại')
-  }, [clearScheduledTimers])
+    if (taskAfter?.mode === 'repeat' && taskAfter.status === 'active' && taskAfter.nextRunAt) {
+      armTask(taskAfter)
+    } else {
+      clearTaskTimer(taskId)
+    }
+
+    taskRunLockRef.current.delete(taskId)
+  }, [accounts, appendScheduleLog, armTask, clearTaskTimer, scheduledTasks, settings, calcNextDailyRunAt])
+
+  useEffect(() => {
+    runTaskRef.current = runTask
+  }, [runTask])
+
+  const cancelScheduleTask = useCallback((taskId) => {
+    clearTaskTimer(taskId)
+    setScheduledTasks(prev => prev.map(t => t.id === taskId
+      ? { ...t, status: 'cancelled', cancelReason: 'user', updatedAt: Date.now() }
+      : t
+    ))
+    appendScheduleLog({ at: Date.now(), taskId, type: 'cancel', message: 'Đã hủy lịch bởi người dùng' })
+    setScheduleMsg('Đã hủy 1 lịch')
+  }, [appendScheduleLog, clearTaskTimer])
+
+  const deleteCancelledScheduleTask = useCallback((taskId) => {
+    const target = scheduledTasks.find(t => t.id === taskId)
+    if (!target || target.status !== 'cancelled') {
+      setScheduleMsg('Chỉ có thể xóa lịch đã hủy')
+      return
+    }
+    setScheduledTasks(prev => prev.filter(t => t.id !== taskId))
+    appendScheduleLog({ at: Date.now(), taskId, type: 'delete', message: 'Đã xóa lịch đã hủy' })
+    if (editingScheduleId === taskId) setEditingScheduleId(null)
+    setScheduleMsg('Đã xóa 1 lịch đã hủy')
+  }, [appendScheduleLog, editingScheduleId, scheduledTasks])
+
+  const resetScheduleForm = useCallback(() => {
+    setEditingScheduleId(null)
+    setScheduleMode('once')
+    setScheduleAt('')
+    setScheduleEveryValue(settings?.scheduleDefaultRepeatValue ?? 10)
+    setScheduleRepeatUnit(settings?.scheduleDefaultRepeatUnit ?? 'minute')
+    setScheduleDailyHour(settings?.scheduleDefaultDailyHour ?? 9)
+    setScheduleDailyMinute(settings?.scheduleDefaultDailyMinute ?? 0)
+    setScheduleDailySecond(settings?.scheduleDefaultDailySecond ?? 0)
+    setScheduleTargetType('selected')
+    setScheduleDelaySec(settings?.scheduleDelaySec ?? 5)
+    setScheduleMsg('')
+  }, [settings])
+
+  const startEditSchedule = useCallback((task) => {
+    if (!task || task.status === 'running') return
+    setEditingScheduleId(task.id)
+    const mode = task.mode === 'repeat' ? 'repeat' : 'once'
+    setScheduleMode(mode)
+    if (mode === 'once') {
+      setScheduleAt(formatDateTimeLocal(task.nextRunAt))
+      setScheduleEveryValue(1)
+      setScheduleRepeatUnit('minute')
+    } else {
+      const unit = ['minute', 'hour', 'day'].includes(task.repeatUnit) ? task.repeatUnit : 'minute'
+      setScheduleRepeatUnit(unit)
+      setScheduleEveryValue(task.everyValue ?? 1)
+      setScheduleAt('')
+      setScheduleDailyHour(task.dailyHour ?? (settings?.scheduleDefaultDailyHour ?? 9))
+      setScheduleDailyMinute(task.dailyMinute ?? (settings?.scheduleDefaultDailyMinute ?? 0))
+      setScheduleDailySecond(task.dailySecond ?? (settings?.scheduleDefaultDailySecond ?? 0))
+    }
+    setScheduleTargetType(task.targetType === 'all' ? 'all' : 'selected')
+    setScheduleDelaySec(task.delaySec ?? (settings?.scheduleDelaySec ?? 5))
+    if (task.targetType === 'selected') {
+      const accountSet = new Set(accounts.map(a => a.id))
+      setSelectedIds(new Set((task.snapshotIds || []).filter(id => accountSet.has(id))))
+    }
+    setScheduleMsg(`Đang sửa lịch ${task.id}`)
+  }, [accounts, settings])
 
   const createSchedule = useCallback(() => {
     setScheduleMsg('')
-    clearScheduledTimers()
 
     const snapshotIds = scheduleTargetType === 'all'
       ? accounts.map(a => a.id)
@@ -208,62 +369,177 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     const delaySec = Math.max(1, Number(scheduleDelaySec) || 5)
     const repeatValue = Math.max(1, Number(scheduleEveryValue) || 1)
     const repeatUnit = ['minute', 'hour', 'day'].includes(scheduleRepeatUnit) ? scheduleRepeatUnit : 'minute'
+    const dailyHour = clampNumber(scheduleDailyHour, 0, 23, 9)
+    const dailyMinute = clampNumber(scheduleDailyMinute, 0, 59, 0)
+    const dailySecond = clampNumber(scheduleDailySecond, 0, 59, 0)
+
+    const editingTask = editingScheduleId ? scheduledTasks.find(t => t.id === editingScheduleId) : null
+    if (editingScheduleId && !editingTask) {
+      setEditingScheduleId(null)
+      setScheduleMsg('Không tìm thấy lịch cần sửa')
+      return
+    }
+
     setSettings(prev => ({
       ...prev,
       scheduleDelaySec: delaySec,
       scheduleDefaultRepeatValue: repeatValue,
       scheduleDefaultRepeatUnit: repeatUnit,
+      scheduleDefaultDailyHour: dailyHour,
+      scheduleDefaultDailyMinute: dailyMinute,
+      scheduleDefaultDailySecond: dailySecond,
     }))
 
+    const taskId = editingTask?.id || `sch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+    const createdAt = editingTask?.createdAt || now
+    const runCount = editingTask?.runCount || 0
+    const lastRunAt = editingTask?.lastRunAt || null
+    const lastResult = editingTask?.lastResult || null
+
+    let task = null
     if (scheduleMode === 'once') {
       const runAt = new Date(scheduleAt).getTime()
       if (!runAt || runAt <= now) {
         setScheduleMsg('Thời điểm chạy không hợp lệ')
         return
       }
-      setScheduledTargetIds(snapshotIds)
-      setScheduledJob({
+      task = {
+        id: taskId,
         mode: 'once',
-        nextRunAt: runAt,
-        createdAt: now,
+        status: 'active',
+        createdAt,
+        updatedAt: now,
         targetType: scheduleTargetType,
-      })
-      scheduleTimeoutRef.current = setTimeout(async () => {
-        await runScheduledFetch(snapshotIds, 'once')
-        clearScheduledTimers()
-        setScheduledJob(null)
-        setScheduledTargetIds([])
-      }, runAt - now)
-      setScheduleMsg(`Đã lên lịch 1 lần cho ${snapshotIds.length} tài khoản`)
+        snapshotIds,
+        delaySec,
+        nextRunAt: runAt,
+        lastRunAt,
+        everyValue: null,
+        repeatUnit: null,
+        intervalMs: null,
+        dailyHour: null,
+        dailyMinute: null,
+        dailySecond: null,
+        runCount,
+        lastResult,
+        cancelReason: null,
+      }
+      setScheduleMsg(editingTask
+        ? `Đã cập nhật lịch 1 lần cho ${snapshotIds.length} tài khoản`
+        : `Đã tạo lịch 1 lần cho ${snapshotIds.length} tài khoản`)
+    } else {
+      const unitMs = repeatUnit === 'day' ? 24 * 60 * 60 * 1000 : repeatUnit === 'hour' ? 60 * 60 * 1000 : 60 * 1000
+      const intervalMs = repeatValue * unitMs
+      const nextRunAt = repeatUnit === 'day'
+        ? calcNextDailyRunAt(now, repeatValue, dailyHour, dailyMinute, dailySecond)
+        : now + intervalMs
+      task = {
+        id: taskId,
+        mode: 'repeat',
+        status: 'active',
+        createdAt,
+        updatedAt: now,
+        targetType: scheduleTargetType,
+        snapshotIds,
+        delaySec,
+        nextRunAt,
+        lastRunAt,
+        everyValue: repeatValue,
+        repeatUnit,
+        intervalMs,
+        dailyHour: repeatUnit === 'day' ? dailyHour : null,
+        dailyMinute: repeatUnit === 'day' ? dailyMinute : null,
+        dailySecond: repeatUnit === 'day' ? dailySecond : null,
+        runCount,
+        lastResult,
+        cancelReason: null,
+      }
+      const label = repeatUnit === 'day' ? 'ngày' : repeatUnit === 'hour' ? 'giờ' : 'phút'
+      const timeLabel = repeatUnit === 'day'
+        ? ` lúc ${String(dailyHour).padStart(2, '0')}:${String(dailyMinute).padStart(2, '0')}:${String(dailySecond).padStart(2, '0')}`
+        : ''
+      setScheduleMsg(editingTask
+        ? `Đã cập nhật lịch lặp mỗi ${repeatValue} ${label}${timeLabel} cho ${snapshotIds.length} tài khoản`
+        : `Đã tạo lịch lặp mỗi ${repeatValue} ${label}${timeLabel} cho ${snapshotIds.length} tài khoản`)
+    }
+
+    if (editingTask) {
+      setScheduledTasks(prev => prev.map(t => t.id === task.id ? task : t))
+      appendScheduleLog({ at: Date.now(), taskId: task.id, type: 'update', message: 'Cập nhật lịch thành công' })
+      clearTaskTimer(task.id)
+      armTask(task)
+      setEditingScheduleId(null)
       return
     }
 
-    const unitMs = repeatUnit === 'day' ? 24 * 60 * 60 * 1000 : repeatUnit === 'hour' ? 60 * 60 * 1000 : 60 * 1000
-    const intervalMs = repeatValue * unitMs
-    const nextRunAt = now + intervalMs
-    setScheduledTargetIds(snapshotIds)
-    setScheduledJob({
-      mode: 'repeat',
-      everyValue: repeatValue,
-      repeatUnit,
-      intervalMs,
-      nextRunAt,
-      createdAt: now,
-      targetType: scheduleTargetType,
-    })
-    scheduleIntervalRef.current = setInterval(async () => {
-      setScheduledJob(prev => prev ? { ...prev, nextRunAt: Date.now() + intervalMs } : prev)
-      await runScheduledFetch(snapshotIds, `repeat-${repeatUnit}`)
-    }, intervalMs)
-    const label = repeatUnit === 'day' ? 'ngày' : repeatUnit === 'hour' ? 'giờ' : 'phút'
-    setScheduleMsg(`Đã lên lịch lặp mỗi ${repeatValue} ${label} cho ${snapshotIds.length} tài khoản`)
-  }, [accounts, clearScheduledTimers, runScheduledFetch, scheduleAt, scheduleDelaySec, scheduleEveryValue, scheduleMode, scheduleRepeatUnit, scheduleTargetType, selectedIds, setSettings])
+    setScheduledTasks(prev => [task, ...prev].slice(0, 100))
+    appendScheduleLog({ at: Date.now(), taskId: task.id, type: 'create', message: 'Tạo lịch mới thành công' })
+    armTask(task)
+  }, [accounts, appendScheduleLog, armTask, clearTaskTimer, editingScheduleId, scheduleAt, scheduleDailyHour, scheduleDailyMinute, scheduleDailySecond, scheduleDelaySec, scheduleEveryValue, scheduleMode, scheduleRepeatUnit, scheduleTargetType, scheduledTasks, selectedIds, setSettings])
 
   useEffect(() => {
-    return () => {
-      clearScheduledTimers()
+    saveSchedules(scheduledTasks)
+  }, [scheduledTasks])
+
+  useEffect(() => {
+    saveScheduleLogs(scheduleLogs)
+  }, [scheduleLogs])
+
+  useEffect(() => {
+    const now = Date.now()
+    const overdueGraceMs = 10 * 60 * 1000
+
+    let normalized = scheduledTasks.map(task => {
+      const next = { ...task }
+      if (!next.id) next.id = `sch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+      if (next.status === 'running') next.status = 'active'
+
+      if (next.status !== 'active') return next
+
+      if (next.mode === 'once') {
+        if (!next.nextRunAt) {
+          next.status = 'completed'
+          next.cancelReason = 'invalid_next_run'
+          next.updatedAt = now
+          return next
+        }
+        if (next.nextRunAt < now && now - next.nextRunAt > overdueGraceMs) {
+          next.status = 'completed'
+          next.cancelReason = 'past_due_dropped'
+          next.updatedAt = now
+        }
+        return next
+      }
+
+      const intervalMs = next.intervalMs || ((next.repeatUnit === 'day' ? 24 : next.repeatUnit === 'hour' ? 1 : 1) * (next.repeatUnit === 'day' ? 60 * 60 * 1000 : next.repeatUnit === 'hour' ? 60 * 60 * 1000 : 60 * 1000) * (next.everyValue || 1))
+      next.intervalMs = Math.max(60 * 1000, intervalMs)
+      if (!next.nextRunAt) {
+        if (next.repeatUnit === 'day' && Number.isFinite(next.dailyHour) && Number.isFinite(next.dailyMinute) && Number.isFinite(next.dailySecond)) {
+          next.nextRunAt = calcNextDailyRunAt(now, next.everyValue || 1, next.dailyHour, next.dailyMinute, next.dailySecond)
+        } else {
+          next.nextRunAt = now + next.intervalMs
+        }
+      }
+      while (next.nextRunAt <= now) next.nextRunAt += next.intervalMs
+      return next
+    })
+
+    setScheduledTasks(normalized)
+
+    for (const task of normalized) {
+      if (task.status !== 'active') continue
+      if (task.mode === 'once' && task.nextRunAt < now && now - task.nextRunAt <= overdueGraceMs) {
+        runTaskRef.current?.(task.id)
+        continue
+      }
+      if (task.nextRunAt && task.nextRunAt > now) armTask(task)
     }
-  }, [clearScheduledTimers])
+
+    return () => {
+      clearAllTaskTimers()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const fetchAllPosts = useCallback(async () => {
     const targets = accounts.filter(a => selectedIds.has(a.id))
@@ -283,6 +559,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       }
     }
     setFetchingAllPosts(false)
+    setSelectedBySelectAll(false)
+    setSelectedIds(new Set())
     setPostsFetchTick(t => t + 1)
     setCacheTick(t => t + 1)
   }, [accounts, selectedIds, settings])
@@ -309,10 +587,13 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       }
     }
     setFetchingAllInsights(false)
+    setSelectedBySelectAll(false)
+    setSelectedIds(new Set())
     setCacheTick(t => t + 1)
   }, [accounts, selectedIds, settings])
 
   const [confirmDelete, setConfirmDelete] = useState(null)
+  const [confirmBulkAction, setConfirmBulkAction] = useState(null)
 
   const removeSelected = () => {
     const names = accounts.filter(a => selectedIds.has(a.id)).map(a => `@${a.username}`).join(', ')
@@ -392,7 +673,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       map[a.id] = (dupes.length > 0 || stale) ? 'abnormal' : 'normal'
     }
     return map
-  }, [accounts, settings])
+  }, [accounts, settings, cacheTick])
 
   const stats = useMemo(() => ({
     total: accountsWithTokenCheck.length,
@@ -448,7 +729,10 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const safeP = Math.min(page, totalPages)
   const paged = filtered.slice((safeP - 1) * perPage, safeP * perPage)
 
-  useEffect(() => { setPage(1) }, [statusFilter, query, sortBy, followersMin, followersMax])
+  useEffect(() => {
+    setSelectedIds(new Set())
+    setPage(1)
+  }, [statusFilter, query, sortBy, followersMin, followersMax])
 
   const handleAdd = async (e) => {
     e?.preventDefault?.()
@@ -510,15 +794,69 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     setConfirmDelete({ type: 'single', id, label: acc ? `@${acc.username}` : id })
   }
 
+  const clearAccountCache = (acc) => {
+    if (!acc?.id) return
+    const cachePrefix = 'td.cache.v1.'
+    const postIds = new Set()
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const fullKey = localStorage.key(i)
+        if (!fullKey || !fullKey.startsWith(`${cachePrefix}posts:${acc.id}:`)) continue
+        const raw = localStorage.getItem(fullKey)
+        if (!raw) continue
+        try {
+          const parsed = JSON.parse(raw)
+          const posts = parsed?.v
+          if (!Array.isArray(posts)) continue
+          posts.forEach(p => {
+            if (p?.id) postIds.add(String(p.id))
+          })
+        } catch {}
+      }
+    } catch {}
+
+    cacheClear(`posts:${acc.id}:`)
+    cacheClear(`insights:${acc.id}`)
+    if (acc.token) cacheClear(`me:${acc.token.slice(-8)}`)
+
+    postIds.forEach((postId) => {
+      cacheClear(`post:${postId}`)
+      cacheClear(`post_insights:${postId}`)
+      cacheClear(`replies:${postId}`)
+    })
+  }
+
   const confirmRemove = () => {
     if (!confirmDelete) return
+
+    let removedAccounts = []
     if (confirmDelete.type === 'single') {
+      removedAccounts = accounts.filter(a => a.id === confirmDelete.id)
       setAccounts(prev => prev.filter(a => a.id !== confirmDelete.id))
     } else {
       const idsSet = new Set(confirmDelete.ids)
+      removedAccounts = accounts.filter(a => idsSet.has(a.id))
       setAccounts(prev => prev.filter(a => !idsSet.has(a.id)))
       setSelectedIds(new Set())
     }
+
+    removedAccounts.forEach(clearAccountCache)
+    if (removedAccounts.length > 0) {
+      setFollowersBaseline(prev => {
+        const next = { ...prev }
+        let changed = false
+        removedAccounts.forEach((acc) => {
+          if (acc?.id && next[acc.id]) {
+            delete next[acc.id]
+            changed = true
+          }
+        })
+        return changed ? next : prev
+      })
+      setPostsFetchTick(t => t + 1)
+      setCacheTick(t => t + 1)
+    }
+
     setConfirmDelete(null)
   }
 
@@ -604,6 +942,66 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     }
     setBulkRunning(false)
   }, [bulkText, settings])
+
+  const confirmBulkImport = useCallback(() => {
+    const tokens = bulkText
+      .split('\n')
+      .map(l => l.trim())
+      .filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i)
+    if (tokens.length === 0) return
+    setConfirmBulkAction({
+      type: 'bulk_import',
+      title: 'Xác nhận nạp hàng loạt',
+      message: `Bạn có chắc muốn nạp hàng loạt ${tokens.length} token?`,
+      dangerNote: 'Tool sẽ gọi API tuần tự cho từng token.',
+      confirmLabel: 'Bắt đầu nạp',
+      run: handleBulkImport,
+    })
+  }, [bulkText, handleBulkImport])
+
+  const confirmRefreshAll = useCallback(() => {
+    if (accounts.length === 0 || refreshingAll) return
+    setConfirmBulkAction({
+      type: 'refresh_all',
+      title: 'Xác nhận refresh toàn bộ',
+      message: `Bạn có chắc muốn refresh token cho toàn bộ ${accounts.length} tài khoản?`,
+      dangerNote: 'Tác vụ sẽ chạy tuần tự và có delay giữa các request.',
+      confirmLabel: 'Refresh all',
+      run: refreshAll,
+    })
+  }, [accounts.length, refreshAll, refreshingAll])
+
+  const confirmFetchAllPosts = useCallback(() => {
+    if (selectedIds.size === 0 || fetchingAllPosts) return
+    setConfirmBulkAction({
+      type: 'fetch_posts',
+      title: 'Xác nhận lấy posts hàng loạt',
+      message: `Bạn có chắc muốn lấy posts cho ${selectedIds.size} tài khoản đã chọn?`,
+      dangerNote: 'Tác vụ sẽ fetch tuần tự theo delay đã cấu hình.',
+      confirmLabel: 'Lấy posts',
+      run: fetchAllPosts,
+    })
+  }, [fetchAllPosts, fetchingAllPosts, selectedIds.size])
+
+  const confirmFetchAllInsights = useCallback(() => {
+    if (selectedIds.size === 0 || fetchingAllInsights || fetchingAllPosts) return
+    setConfirmBulkAction({
+      type: 'fetch_insights',
+      title: 'Xác nhận lấy insights hàng loạt',
+      message: `Bạn có chắc muốn lấy insights cho ${selectedIds.size} tài khoản đã chọn?`,
+      dangerNote: 'Tác vụ sẽ fetch tuần tự theo delay đã cấu hình.',
+      confirmLabel: 'Lấy insights',
+      run: fetchAllInsights,
+    })
+  }, [fetchAllInsights, fetchingAllInsights, fetchingAllPosts, selectedIds.size])
+
+  const runConfirmedBulkAction = () => {
+    if (!confirmBulkAction?.run) return
+    const action = confirmBulkAction.run
+    setConfirmBulkAction(null)
+    action()
+  }
 
   return (
     <div className="min-h-screen text-neutral-900 dark:text-neutral-100 bg-neutral-50 dark:bg-neutral-950">
@@ -787,7 +1185,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
               bulkRunning={bulkRunning}
               bulkLog={bulkLog}
               bulkProgress={bulkProgress}
-              onStart={handleBulkImport}
+              onStart={confirmBulkImport}
               onStop={() => { bulkAbort.current = true }}
               bulkDelay={settings?.bulkDelay ?? 5}
             />
@@ -816,16 +1214,16 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
             </div>
             <div className="flex items-center gap-2">
               <button
-                onClick={selectedIds.size === filtered.length && filtered.length > 0 ? selectNone : selectAll}
+                onClick={selectedIds.size > 0 ? selectNone : selectAll}
                 disabled={filtered.length === 0}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:bg-neutral-800 disabled:opacity-50 text-xs"
               >
-                {selectedIds.size === filtered.length && filtered.length > 0
+                {selectedIds.size > 0
                   ? <><CheckSquare className="w-3.5 h-3.5" /> Bỏ chọn</>
                   : <><Square className="w-3.5 h-3.5" /> Chọn tất cả</>}
               </button>
               <button
-                onClick={refreshAll}
+                onClick={confirmRefreshAll}
                 disabled={refreshingAll || accounts.length === 0}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:bg-neutral-800 disabled:opacity-50 text-xs"
                 title="Làm mới toàn bộ (tuần tự)"
@@ -852,7 +1250,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
               <span className="text-sm text-indigo-300">{selectedIds.size} đã chọn</span>
               <div className="flex-1" />
               <button
-                onClick={fetchAllPosts}
+                onClick={confirmFetchAllPosts}
                 disabled={fetchingAllPosts}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-60 text-xs font-medium"
               >
@@ -869,7 +1267,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                 </button>
               )}
               <button
-                onClick={fetchAllInsights}
+                onClick={confirmFetchAllInsights}
                 disabled={fetchingAllInsights || fetchingAllPosts}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-60 text-xs font-medium text-white"
               >
@@ -936,30 +1334,72 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                     />
                   </label>
                 ) : (
-                  <div className="md:col-span-2 grid grid-cols-2 gap-2">
-                    <label className="text-xs text-neutral-400">
-                      Chu kỳ
-                      <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        value={scheduleEveryValue}
-                        onChange={(e) => setScheduleEveryValue(e.target.value)}
-                        className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
-                      />
-                    </label>
-                    <label className="text-xs text-neutral-400">
-                      Đơn vị
-                      <select
-                        value={scheduleRepeatUnit}
-                        onChange={(e) => setScheduleRepeatUnit(e.target.value)}
-                        className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
-                      >
-                        <option value="minute">Phút</option>
-                        <option value="hour">Giờ</option>
-                        <option value="day">Ngày</option>
-                      </select>
-                    </label>
+                  <div className="md:col-span-2 space-y-2">
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="text-xs text-neutral-400">
+                        Chu kỳ
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={scheduleEveryValue}
+                          onChange={(e) => setScheduleEveryValue(e.target.value)}
+                          className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                        />
+                      </label>
+                      <label className="text-xs text-neutral-400">
+                        Đơn vị
+                        <select
+                          value={scheduleRepeatUnit}
+                          onChange={(e) => setScheduleRepeatUnit(e.target.value)}
+                          className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                        >
+                          <option value="minute">Phút</option>
+                          <option value="hour">Giờ</option>
+                          <option value="day">Ngày</option>
+                        </select>
+                      </label>
+                    </div>
+                    {scheduleRepeatUnit === 'day' && (
+                      <div className="grid grid-cols-3 gap-2">
+                        <label className="text-xs text-neutral-400">
+                          Giờ
+                          <input
+                            type="number"
+                            min="0"
+                            max="23"
+                            step="1"
+                            value={scheduleDailyHour}
+                            onChange={(e) => setScheduleDailyHour(e.target.value)}
+                            className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                          />
+                        </label>
+                        <label className="text-xs text-neutral-400">
+                          Phút
+                          <input
+                            type="number"
+                            min="0"
+                            max="59"
+                            step="1"
+                            value={scheduleDailyMinute}
+                            onChange={(e) => setScheduleDailyMinute(e.target.value)}
+                            className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                          />
+                        </label>
+                        <label className="text-xs text-neutral-400">
+                          Giây
+                          <input
+                            type="number"
+                            min="0"
+                            max="59"
+                            step="1"
+                            value={scheduleDailySecond}
+                            onChange={(e) => setScheduleDailySecond(e.target.value)}
+                            className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                          />
+                        </label>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -975,44 +1415,139 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                   </select>
                 </label>
 
-                <label className="text-xs text-neutral-400">
-                  Delay riêng (giây)
-                  <input
-                    type="number"
-                    min="1"
-                    step="1"
-                    value={scheduleDelaySec}
-                    onChange={(e) => setScheduleDelaySec(e.target.value)}
-                    className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
-                  />
-                </label>
+                {showScheduleDelay && (
+                  <label className="text-xs text-neutral-400">
+                    Delay riêng (giây)
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={scheduleDelaySec}
+                      onChange={(e) => setScheduleDelaySec(e.target.value)}
+                      className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                    />
+                  </label>
+                )}
               </div>
+
+              {scheduleTargetType === 'selected' && (
+                <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs text-neutral-400">Chọn tài khoản chạy lịch ({selectedIds.size}/{accounts.length})</div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setSelectedIds(new Set(accounts.map(a => a.id)))}
+                        className="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-800 text-xs hover:bg-neutral-200 dark:hover:bg-neutral-900"
+                      >
+                        Chọn tất cả
+                      </button>
+                      <button
+                        onClick={() => setSelectedIds(new Set())}
+                        className="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-800 text-xs hover:bg-neutral-200 dark:hover:bg-neutral-900"
+                      >
+                        Bỏ chọn
+                      </button>
+                    </div>
+                  </div>
+
+                  {accounts.length === 0 ? (
+                    <div className="text-xs text-neutral-500">Chưa có tài khoản nào.</div>
+                  ) : (
+                    <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
+                      {accounts.map((a) => (
+                        <label
+                          key={a.id}
+                          className="flex items-center gap-2 text-xs px-2 py-1.5 rounded hover:bg-neutral-200/60 dark:hover:bg-neutral-900 cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(a.id)}
+                            onChange={() => toggleSelect(a.id)}
+                            className="w-3.5 h-3.5"
+                          />
+                          <span className="truncate">@{a.username || a.id}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="flex items-center gap-2 flex-wrap">
                 <button
                   onClick={createSchedule}
-                  disabled={scheduleRunning}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-xs font-medium text-neutral-900"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-medium text-neutral-900"
                 >
-                  <Clock className="w-3.5 h-3.5" /> Lên lịch
+                  <Clock className="w-3.5 h-3.5" /> {editingScheduleId ? 'Lưu chỉnh sửa' : 'Tạo lịch'}
                 </button>
-                <button
-                  onClick={cancelSchedule}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-800 text-rose-400 hover:bg-rose-500/10 text-xs"
-                >
-                  <X className="w-3.5 h-3.5" /> Hủy lịch
-                </button>
+                {editingScheduleId && (
+                  <button
+                    onClick={resetScheduleForm}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-xs"
+                  >
+                    <X className="w-3.5 h-3.5" /> Hủy sửa
+                  </button>
+                )}
                 {scheduleMsg && <span className="text-xs text-neutral-300">{scheduleMsg}</span>}
               </div>
 
-              {scheduledJob && (
-                <div className="text-xs text-neutral-300 rounded-lg border border-neutral-200 dark:border-neutral-800 px-3 py-2">
-                  Lịch hiện tại: <strong>{scheduledJob.mode === 'once' ? '1 lần' : `Lặp mỗi ${scheduledJob.everyValue} ${scheduledJob.repeatUnit === 'day' ? 'ngày' : scheduledJob.repeatUnit === 'hour' ? 'giờ' : 'phút'}`}</strong> ·
-                  target <strong>{scheduledJob.targetType === 'all' ? 'All' : 'Selected'}</strong> ·
-                  snapshot <strong>{scheduledTargetIds.length}</strong> account ·
-                  lần chạy kế tiếp: <strong>{new Date(scheduledJob.nextRunAt).toLocaleString()}</strong>
-                </div>
-              )}
+              <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-2 space-y-2">
+                <div className="text-xs text-neutral-400">Danh sách lịch</div>
+                {scheduledTasks.length === 0 ? (
+                  <div className="text-xs text-neutral-500">Chưa có lịch nào</div>
+                ) : (
+                  <div className="space-y-2 max-h-52 overflow-y-auto">
+                    {scheduledTasks.map((task) => (
+                      <div key={task.id} className="rounded-lg border border-neutral-200 dark:border-neutral-800 px-3 py-2 text-xs text-neutral-300">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="truncate">
+                            <span className="font-medium">{task.mode === 'once'
+                              ? '1 lần'
+                              : `Lặp mỗi ${task.everyValue} ${task.repeatUnit === 'day' ? 'ngày' : task.repeatUnit === 'hour' ? 'giờ' : 'phút'}${task.repeatUnit === 'day' && Number.isFinite(task.dailyHour) && Number.isFinite(task.dailyMinute) && Number.isFinite(task.dailySecond) ? ` lúc ${String(task.dailyHour).padStart(2, '0')}:${String(task.dailyMinute).padStart(2, '0')}:${String(task.dailySecond).padStart(2, '0')}` : ''}`}</span>
+                            {' · '}target <strong>{task.targetType === 'all' ? 'All' : 'Selected'}</strong>
+                            {' · '}snapshot <strong>{task.snapshotIds?.length || 0}</strong>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            {task.status !== 'running' && task.status !== 'cancelled' && (
+                              <button
+                                onClick={() => startEditSchedule(task)}
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded border border-neutral-300 dark:border-neutral-700 text-neutral-300 hover:bg-neutral-200/20 dark:hover:bg-neutral-900"
+                              >
+                                <Settings className="w-3 h-3" /> Sửa
+                              </button>
+                            )}
+                            {(task.status === 'active' || task.status === 'running') && (
+                              <button
+                                onClick={() => cancelScheduleTask(task.id)}
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded border border-rose-800 text-rose-400 hover:bg-rose-500/10"
+                              >
+                                <X className="w-3 h-3" /> Hủy
+                              </button>
+                            )}
+                            {task.status === 'cancelled' && (
+                              <button
+                                onClick={() => deleteCancelledScheduleTask(task.id)}
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded border border-rose-800 text-rose-400 hover:bg-rose-500/10"
+                              >
+                                <Trash2 className="w-3 h-3" /> Xóa
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-neutral-400">
+                          <span>Trạng thái: <strong>{task.status}</strong></span>
+                          <span>Kế tiếp: {task.nextRunAt ? new Date(task.nextRunAt).toLocaleString() : '—'}</span>
+                        </div>
+                        {task.lastResult && (
+                          <div className="mt-1 text-[11px] text-neutral-400">
+                            Run gần nhất: ok {task.lastResult.ok} / fail {task.lastResult.fail} · {task.lastResult.durationSec}s
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-2">
                 <div className="text-xs text-neutral-400 mb-1">Logs lịch chạy (mới nhất)</div>
@@ -1020,10 +1555,12 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                   <div className="text-xs text-neutral-500">Chưa có log</div>
                 ) : (
                   <div className="space-y-1 max-h-36 overflow-y-auto">
-                    {scheduleLogs.map((l, i) => (
-                      <div key={i} className="text-xs font-mono text-neutral-300 flex items-center justify-between gap-2">
-                        <span>{new Date(l.at).toLocaleString()} · {l.mode} · {l.targetCount} acc</span>
-                        <span className={l.fail > 0 ? 'text-amber-300' : 'text-emerald-300'}>ok {l.success} / fail {l.fail} · {l.durationSec}s</span>
+                    {scheduleLogs.map((l) => (
+                      <div key={l.id} className="text-xs font-mono text-neutral-300 flex items-center justify-between gap-2">
+                        <span>{new Date(l.at).toLocaleString()} · {l.taskId} · {l.type}</span>
+                        {l.type === 'run'
+                          ? <span className={l.fail > 0 ? 'text-amber-300' : 'text-emerald-300'}>ok {l.success} / fail {l.fail} · {l.durationSec}s</span>
+                          : <span className="text-neutral-400">{l.message || ''}</span>}
                       </div>
                     ))}
                   </div>
@@ -1100,6 +1637,35 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           <RefreshCw className="w-3 h-3" /> Cập nhật
         </button>
       </footer>
+
+      {confirmBulkAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setConfirmBulkAction(null)}>
+          <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-6 max-w-md w-full mx-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-2 text-amber-500 dark:text-amber-400 mb-3">
+              <AlertTriangle className="w-5 h-5" />
+              <h3 className="font-semibold">{confirmBulkAction.title}</h3>
+            </div>
+            <p className="text-sm text-neutral-700 dark:text-neutral-300 mb-1">{confirmBulkAction.message}</p>
+            {confirmBulkAction.dangerNote && (
+              <p className="text-xs text-neutral-500 dark:text-neutral-500 mb-4">{confirmBulkAction.dangerNote}</p>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmBulkAction(null)}
+                className="px-4 py-2 rounded-lg border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-sm"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={runConfirmedBulkAction}
+                className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium"
+              >
+                {confirmBulkAction.confirmLabel || 'Xác nhận'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {confirmDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setConfirmDelete(null)}>
@@ -1666,6 +2232,32 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
     finally { setFetchingPosts(false); onCacheChange?.() }
   }
 
+  const [contextMenu, setContextMenu] = useState(null)
+
+  useEffect(() => {
+    if (!contextMenu) return
+    const handleEsc = (e) => {
+      if (e.key === 'Escape') setContextMenu(null)
+    }
+    window.addEventListener('keydown', handleEsc)
+    return () => {
+      window.removeEventListener('keydown', handleEsc)
+    }
+  }, [contextMenu])
+
+  const openContextMenu = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({ x: e.clientX, y: e.clientY })
+  }
+
+  const closeContextMenu = () => setContextMenu(null)
+
+  const runMenuAction = async (fn) => {
+    closeContextMenu()
+    await fn()
+  }
+
   const renderLastPost = () => {
     if (lastPostTime === undefined) {
       return (
@@ -1696,7 +2288,12 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
   }
 
   return (
-    <div className={`rounded-xl border p-4 transition ${selected ? 'border-indigo-500 bg-indigo-500/5' : 'border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900/40'}`}>
+    <div
+      onContextMenu={openContextMenu}
+      className={`rounded-xl border p-4 transition-shadow duration-150 hover:shadow-lg dark:hover:shadow-black/50 ${selected
+        ? 'border-indigo-500 bg-indigo-500/5 dark:hover:ring-1 dark:hover:ring-indigo-500/40'
+        : 'border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900/40 hover:border-neutral-300 dark:hover:border-neutral-700 dark:hover:bg-neutral-900/70 dark:hover:ring-1 dark:hover:ring-neutral-700/70'}`}
+    >
       <div className="flex items-start gap-3">
         <button
           onClick={onToggleSelect}
@@ -1830,6 +2427,28 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
           </button>
         </div>
       </div>
+
+      {contextMenu && (
+        <div
+          className="fixed inset-0 z-40"
+          onClick={closeContextMenu}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); closeContextMenu() }}
+        >
+          <div
+            className="fixed z-50 min-w-[180px] rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 shadow-xl p-1"
+            style={{ left: Math.min(contextMenu.x, window.innerWidth - 200), top: Math.min(contextMenu.y, window.innerHeight - 240) }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button onClick={() => runMenuAction(() => onOpen(a.id))} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800">Mở chi tiết</button>
+            <button onClick={() => runMenuAction(() => onToggleSelect())} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800">{selected ? 'Bỏ chọn' : 'Chọn tài khoản'}</button>
+            <button disabled={loading} onClick={() => runMenuAction(() => onRefresh(a.id))} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50">Refresh token</button>
+            <button disabled={fetchingInsights} onClick={() => runMenuAction(handleGetInsights)} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50">Lấy insights</button>
+            <button disabled={fetchingPosts} onClick={() => runMenuAction(handleFetchPosts)} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50">Lấy posts</button>
+            <div className="my-1 h-px bg-neutral-200 dark:bg-neutral-700" />
+            <button onClick={() => runMenuAction(() => onRemove(a.id))} className="w-full text-left px-3 py-1.5 rounded-lg text-xs text-rose-500 hover:bg-rose-500/10">Xóa tài khoản</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
