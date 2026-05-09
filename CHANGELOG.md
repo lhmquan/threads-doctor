@@ -1,5 +1,16 @@
 # Changelog — Threads Doctor
 
+## v0.12.1 — 2026-05-09
+
+### Bulk username đối chiếu
+- Thêm mode `Đối chiếu username` trong khối thêm tài khoản để dán danh sách và lọc ra username thiếu trong tool
+- Hỗ trợ input username dạng URL profile Threads (`threads.com` / `threads.net`) và chuẩn hoá tự động
+- Thêm nút `Clear input` để xoá nhanh input + kết quả đối chiếu
+
+### Context menu trên desktop app
+- Khôi phục menu chuột phải trong Electron cho ô nhập liệu: Undo/Redo/Cut/Copy/Paste/Select All
+- Thêm menu chuột phải vùng thường: Back/Forward/Refresh + Copy/Select All
+
 ## v0.12.0 — 2026-05-08
 
 ### App Logs page (toàn tool)

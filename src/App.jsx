@@ -13,6 +13,85 @@ import { cacheClear, cacheGet, cacheStats, cacheEntries, formatBytes } from './l
 const APP_VERSION = '0.12.0'
 const MAX_SCHEDULE_LOGS = 200
 const MAX_APP_LOGS = 1500
+const MAX_SCHEDULE_FAILURE_DETAILS = 12
+const SCHEDULE_FAILURE_PREVIEW = 3
+const LOCKED_AVATAR_SIGNATURE = '573323465_1219825463302212_7278921664109726296_n'
+
+function compactErrorMessage(message, max = 120) {
+  const text = String(message || 'Lỗi không xác định').replace(/\s+/g, ' ').trim()
+  if (text.length <= max) return text
+  return text.slice(0, max - 1) + '…'
+}
+
+function bucketScheduleFailureError(message) {
+  const text = String(message || '').toLowerCase()
+  if (!text) return 'Lỗi khác'
+  if (text.includes('404') || text.includes('webhook không tồn tại')) return '404 webhook'
+  if (text.includes('access deactivated')) return 'Token deactivated'
+  if (text.includes('access blocked')) return 'Token blocked'
+  if (text.includes('timeout') || text.includes('timed out')) return 'Timeout'
+  if (text.includes('429') || text.includes('rate limit')) return 'Rate limit'
+  if (text.includes('network') || text.includes('failed to fetch')) return 'Network'
+  if (text.includes('500') || text.includes('502') || text.includes('503') || text.includes('504')) return 'Server error'
+  return 'Lỗi khác'
+}
+
+function summarizeScheduleFailures(failures = []) {
+  const grouped = new Map()
+  for (const item of failures || []) {
+    const reason = bucketScheduleFailureError(item?.error || item?.message || '')
+    grouped.set(reason, (grouped.get(reason) || 0) + 1)
+  }
+  return Array.from(grouped.entries())
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
+}
+
+function normalizeUsername(raw) {
+  const text = String(raw || '').trim().toLowerCase()
+  if (!text) return ''
+
+  const profileMatch = text.match(/threads\.(?:net|com)\/@([^/?#]+)/i)
+  if (profileMatch?.[1]) return profileMatch[1].replace(/^@+/, '')
+
+  return text.replace(/^@+/, '')
+}
+
+function parseBulkUsernames(text) {
+  return String(text || '')
+    .split(/[\n,;\t ]+/)
+    .map((v) => normalizeUsername(v))
+    .filter(Boolean)
+    .filter((v, i, a) => a.indexOf(v) === i)
+}
+
+function isAccountLocked(account) {
+  const url = account?.avatar || ''
+  if (!url) return false
+  return url.includes(LOCKED_AVATAR_SIGNATURE)
+}
+
+function isTokenDead(account) {
+  return (account?.error || '').toLowerCase().includes('access deactivated')
+}
+
+function isTokenBlocked(account) {
+  return (account?.error || '').toLowerCase().includes('access blocked')
+}
+
+function normalizeAccountStatus(account) {
+  if (!account) return account
+  if (isAccountLocked(account) && account.status !== 'locked') {
+    return { ...account, status: 'locked', error: 'Tài khoản bị khoá (avatar trắng)' }
+  }
+  if (isTokenDead(account) && account.status !== 'error') {
+    return { ...account, status: 'error', error: account.error || 'Token die' }
+  }
+  if (isTokenBlocked(account) && account.status !== 'blocked') {
+    return { ...account, status: 'blocked', error: account.error || 'Token bị block tạm thời' }
+  }
+  return account
+}
 
 function useTheme() {
   const [dark, setDark] = useState(() => {
@@ -58,7 +137,8 @@ export default function Root() {
   if (m && m[1] && m[1] !== '') {
     const userId = m[1]
     const postId = m[2]
-    const account = accounts.find(a => a.id === userId)
+    const accountRaw = accounts.find(a => a.id === userId)
+    const account = accountRaw ? normalizeAccountStatus(accountRaw) : null
     if (account) {
       return postId
         ? <PostDetailView account={account} postId={postId} settings={settings} navigate={navigate} />
@@ -103,10 +183,13 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState('')
 
-  const [showBulk, setShowBulk] = useState(false)
+  const [addPanelMode, setAddPanelMode] = useState('single')
   const [bulkText, setBulkText] = useState('')
+  const [bulkLookupText, setBulkLookupText] = useState('')
+  const [bulkLookupResult, setBulkLookupResult] = useState(null)
   const [bulkRunning, setBulkRunning] = useState(false)
   const [bulkLog, setBulkLog] = useState([])
+  const [bulkFailed, setBulkFailed] = useState([])
   const [bulkProgress, setBulkProgress] = useState({ done: 0, total: 0 })
   const bulkAbort = useRef(false)
 
@@ -235,13 +318,23 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     const DELAY = Math.max(1, Number(taskSnapshot.delaySec) || 5) * 1000
     let ok = 0
     let fail = 0
+    const failureDetails = []
 
     for (let i = 0; i < targets.length; i++) {
+      const target = targets[i]
       try {
-        await fetchPosts(targets[i].id, targets[i].token, { settings, limit: 10, skipCache: true })
+        await fetchPosts(target.id, target.token, { settings, limit: 10, skipCache: true })
         ok++
-      } catch {
+      } catch (err) {
         fail++
+        if (failureDetails.length < MAX_SCHEDULE_FAILURE_DETAILS) {
+          failureDetails.push({
+            accountId: target.id,
+            username: target.username || null,
+            token: target.token ? maskToken(target.token) : null,
+            error: compactErrorMessage(err?.message || 'Lỗi không xác định'),
+          })
+        }
       }
       if (i < targets.length - 1) await new Promise(r => setTimeout(r, DELAY))
     }
@@ -288,6 +381,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       fail,
       durationSec,
       status: runStatus,
+      failures: failureDetails,
+      failHidden: Math.max(0, fail - failureDetails.length),
     })
     appendAppLog({
       at: endedAt,
@@ -295,7 +390,15 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       source: 'scheduler',
       action: 'run',
       message: `Scheduler run ${runStatus}: ok ${ok} / fail ${fail}`,
-      meta: { taskId, targetCount: targets.length, durationSec, mode: taskSnapshot.mode },
+      meta: {
+        taskId,
+        targetCount: targets.length,
+        durationSec,
+        mode: taskSnapshot.mode,
+        fail,
+        failures: failureDetails,
+        failHidden: Math.max(0, fail - failureDetails.length),
+      },
     })
 
     setPostsFetchTick(t => t + 1)
@@ -729,33 +832,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     return Date.now() - new Date(ts).getTime()
   }
 
-  const isAccountLocked = (account) => {
-    const url = account.avatar || ''
-    if (!url) return false
-    return url.includes('573323465_1219825463302212_7278921664109726296_n')
-  }
-
-  const isTokenDead = (account) => {
-    return (account.error || '').toLowerCase().includes('access deactivated')
-  }
-
-  const isTokenBlocked = (account) => {
-    return (account.error || '').toLowerCase().includes('access blocked')
-  }
-
   const accountsWithTokenCheck = useMemo(() => {
-    return accounts.map(a => {
-      if (isAccountLocked(a) && a.status !== 'locked') {
-        return { ...a, status: 'locked', error: 'Tài khoản bị khoá (avatar trắng)' }
-      }
-      if (isTokenDead(a) && a.status !== 'error') {
-        return { ...a, status: 'error', error: a.error || 'Token die' }
-      }
-      if (isTokenBlocked(a) && a.status !== 'blocked') {
-        return { ...a, status: 'blocked', error: a.error || 'Token bị block tạm thời' }
-      }
-      return a
-    })
+    return accounts.map(a => normalizeAccountStatus(a))
   }, [accounts])
 
   const accountHealthMap = useMemo(() => {
@@ -777,8 +855,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     blocked: accountsWithTokenCheck.filter(a => a.status === 'blocked').length,
     abnormal: accountsWithTokenCheck.filter(a => accountHealthMap[a.id] === 'abnormal').length,
     normal: accountsWithTokenCheck.filter(a => accountHealthMap[a.id] === 'normal' && a.status !== 'error' && a.status !== 'locked' && a.status !== 'blocked').length,
-    noPosts: accountsWithTokenCheck.filter(a => !cacheGet(`posts:${a.id}:10`, (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000)).length,
-    noInsights: accountsWithTokenCheck.filter(a => !cacheGet(`insights:${a.id}`, (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000)).length,
+    noPosts: accountsWithTokenCheck.filter(a => a.status === 'ok' && !cacheGet(`posts:${a.id}:10`, (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000)).length,
+    noInsights: accountsWithTokenCheck.filter(a => a.status === 'ok' && !cacheGet(`insights:${a.id}`, (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000)).length,
   }), [accountsWithTokenCheck, accountHealthMap, settings, cacheTick])
 
   const getFollowers = (a) => {
@@ -803,8 +881,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       if (statusFilter === 'error') return a.status === 'error'
       if (statusFilter === 'locked') return a.status === 'locked'
       if (statusFilter === 'blocked') return a.status === 'blocked'
-      if (statusFilter === 'no_posts') return !cacheGet(`posts:${a.id}:10`, postsTTL)
-      if (statusFilter === 'no_insights') return !cacheGet(`insights:${a.id}`, insightsTTL)
+      if (statusFilter === 'no_posts') return a.status === 'ok' && !cacheGet(`posts:${a.id}:10`, postsTTL)
+      if (statusFilter === 'no_insights') return a.status === 'ok' && !cacheGet(`insights:${a.id}`, insightsTTL)
       return true
     })
 
@@ -840,6 +918,11 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     setAppLogs([])
     setScheduleMsg('Đã xóa toàn bộ app logs')
   }, [])
+
+  useEffect(() => {
+    setAddError('')
+    setUrlMsg('')
+  }, [path])
 
   const handleAdd = async (e) => {
     e?.preventDefault?.()
@@ -1048,26 +1131,50 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     setRefreshingAll(false)
   }, [accounts, appendAppLog, settings])
 
-  const handleBulkImport = useCallback(async () => {
-    const tokens = bulkText
+  const parseBulkTokens = useCallback((text) => {
+    return text
       .split('\n')
       .map(l => l.trim())
       .filter(Boolean)
       .filter((v, i, a) => a.indexOf(v) === i)
-    if (tokens.length === 0) return
+  }, [])
+
+  const handleBulkLookup = useCallback(() => {
+    const inputUsernames = parseBulkUsernames(bulkLookupText)
+    const existingSet = new Set(
+      accounts
+        .map((a) => normalizeUsername(a?.username))
+        .filter(Boolean)
+    )
+    const missingUsernames = inputUsernames.filter((u) => !existingSet.has(u))
+    const matchedUsernames = inputUsernames.filter((u) => existingSet.has(u))
+
+    setBulkLookupResult({
+      inputCount: inputUsernames.length,
+      missingUsernames,
+      matchedUsernames,
+    })
+  }, [accounts, bulkLookupText])
+
+  const runBulkImportTokens = useCallback(async (tokens, { mode = 'import', clearPrevious = true } = {}) => {
+    if (!Array.isArray(tokens) || tokens.length === 0) return
+
     appendAppLog({
       level: 'info',
       source: 'bulk_import',
-      action: 'start',
-      message: `Bắt đầu nạp hàng loạt ${tokens.length} token`,
+      action: mode === 'retry_failed' ? 'retry_start' : 'start',
+      message: mode === 'retry_failed' ? `Bắt đầu thử lại ${tokens.length} token lỗi` : `Bắt đầu nạp hàng loạt ${tokens.length} token`,
       meta: { total: tokens.length },
     })
+
     setBulkRunning(true)
-    setBulkLog([])
+    if (clearPrevious) setBulkLog([])
+    setBulkFailed([])
     setBulkProgress({ done: 0, total: tokens.length })
     bulkAbort.current = false
 
     const DELAY = (settings?.bulkDelay ?? 5) * 1000
+    const nextFailed = []
 
     for (let i = 0; i < tokens.length; i++) {
       if (bulkAbort.current) {
@@ -1077,10 +1184,11 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           source: 'bulk_import',
           action: 'stopped',
           message: 'Nạp hàng loạt bị dừng bởi người dùng',
-          meta: { at: i, total: tokens.length },
+          meta: { at: i, total: tokens.length, mode },
         })
         break
       }
+
       const t = tokens[i]
       try {
         const info = await fetchMe(t, { settings })
@@ -1110,39 +1218,54 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           source: 'bulk_import',
           action: 'item_ok',
           message: `Nạp token thành công cho @${info.username}`,
-          meta: { id: info.id, index: i + 1, total: tokens.length },
+          meta: { id: info.id, index: i + 1, total: tokens.length, mode },
         })
       } catch (err) {
-        setBulkLog(prev => [...prev, { token: t, ok: false, msg: err.message }])
+        const errorMsg = err?.message || 'Nạp token thất bại'
+        setBulkLog(prev => [...prev, { token: t, ok: false, msg: errorMsg }])
+        if (!nextFailed.some(x => x.token === t)) {
+          nextFailed.push({ token: t, error: errorMsg, at: Date.now() })
+        }
         appendAppLog({
           level: 'warn',
           source: 'bulk_import',
           action: 'item_fail',
-          message: err.message || 'Nạp token thất bại',
-          meta: { index: i + 1, total: tokens.length },
+          message: errorMsg,
+          meta: { index: i + 1, total: tokens.length, mode },
         })
       }
+
       setBulkProgress({ done: i + 1, total: tokens.length })
       if (i < tokens.length - 1 && !bulkAbort.current) {
         await new Promise(r => setTimeout(r, DELAY))
       }
     }
+
+    setBulkFailed(nextFailed)
     appendAppLog({
-      level: 'info',
+      level: nextFailed.length > 0 ? 'warn' : 'info',
       source: 'bulk_import',
-      action: 'finish',
-      message: 'Hoàn tất phiên nạp hàng loạt',
-      meta: { total: tokens.length },
+      action: mode === 'retry_failed' ? 'retry_finish' : 'finish',
+      message: mode === 'retry_failed' ? 'Hoàn tất thử lại token lỗi' : 'Hoàn tất phiên nạp hàng loạt',
+      meta: { total: tokens.length, failed: nextFailed.length, mode },
     })
     setBulkRunning(false)
-  }, [appendAppLog, bulkText, settings])
+  }, [appendAppLog, settings])
+
+  const handleBulkImport = useCallback(async () => {
+    const tokens = parseBulkTokens(bulkText)
+    if (tokens.length === 0) return
+    await runBulkImportTokens(tokens, { mode: 'import', clearPrevious: true })
+  }, [bulkText, parseBulkTokens, runBulkImportTokens])
+
+  const retryFailedBulkImport = useCallback(async () => {
+    const tokens = bulkFailed.map(item => item.token).filter((v, i, a) => !!v && a.indexOf(v) === i)
+    if (tokens.length === 0) return
+    await runBulkImportTokens(tokens, { mode: 'retry_failed', clearPrevious: false })
+  }, [bulkFailed, runBulkImportTokens])
 
   const confirmBulkImport = useCallback(() => {
-    const tokens = bulkText
-      .split('\n')
-      .map(l => l.trim())
-      .filter(Boolean)
-      .filter((v, i, a) => a.indexOf(v) === i)
+    const tokens = parseBulkTokens(bulkText)
     if (tokens.length === 0) return
     setConfirmBulkAction({
       type: 'bulk_import',
@@ -1152,7 +1275,20 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       confirmLabel: 'Bắt đầu nạp',
       run: handleBulkImport,
     })
-  }, [bulkText, handleBulkImport])
+  }, [bulkText, handleBulkImport, parseBulkTokens])
+
+  const confirmRetryFailedBulkImport = useCallback(() => {
+    const tokens = bulkFailed.map(item => item.token).filter((v, i, a) => !!v && a.indexOf(v) === i)
+    if (tokens.length === 0 || bulkRunning) return
+    setConfirmBulkAction({
+      type: 'bulk_import_retry_failed',
+      title: 'Xác nhận thử lại token lỗi',
+      message: `Bạn có chắc muốn thử lại ${tokens.length} token bị lỗi?`,
+      dangerNote: 'Tool sẽ chỉ chạy lại nhóm token lỗi của lần chạy gần nhất.',
+      confirmLabel: 'Thử lại token lỗi',
+      run: retryFailedBulkImport,
+    })
+  }, [bulkFailed, bulkRunning, retryFailedBulkImport])
 
   const confirmRefreshAll = useCallback(() => {
     if (accounts.length === 0 || refreshingAll) return
@@ -1212,7 +1348,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => { navigate('/'); setStatusFilter('all'); setSortBy('default'); setFollowersMin(''); setFollowersMax(''); setQuery(''); setPage(1); setShowSettings(false); setShowBulk(false); setBulkText(''); setBulkLog([]) }}
+              onClick={() => { navigate('/'); setStatusFilter('all'); setSortBy('default'); setFollowersMin(''); setFollowersMax(''); setQuery(''); setPage(1); setShowSettings(false); setAddPanelMode('single'); setBulkText(''); setBulkLookupText(''); setBulkLookupResult(null); setBulkLog([]); setBulkFailed([]); setAddError(''); setUrlMsg('') }}
               className="p-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
               title="Trang chủ"
             >
@@ -1342,16 +1478,29 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
               <Plus className="w-4 h-4 text-indigo-400" />
               <h2 className="font-medium">Thêm tài khoản</h2>
             </div>
-            <button
-              onClick={() => setShowBulk(v => !v)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:bg-neutral-800 text-xs"
-            >
-              <List className="w-3.5 h-3.5" />
-              {showBulk ? 'Thêm đơn' : 'Nạp hàng loạt'}
-            </button>
+            <div className="inline-flex items-center rounded-lg border border-neutral-200 dark:border-neutral-800 overflow-hidden">
+              <button
+                onClick={() => setAddPanelMode('single')}
+                className={`px-2.5 py-1.5 text-xs ${addPanelMode === 'single' ? 'bg-indigo-500/20 text-indigo-300' : 'hover:bg-neutral-200 dark:hover:bg-neutral-800 text-neutral-400'}`}
+              >
+                Thêm đơn
+              </button>
+              <button
+                onClick={() => setAddPanelMode('bulk')}
+                className={`px-2.5 py-1.5 text-xs border-l border-neutral-200 dark:border-neutral-800 ${addPanelMode === 'bulk' ? 'bg-indigo-500/20 text-indigo-300' : 'hover:bg-neutral-200 dark:hover:bg-neutral-800 text-neutral-400'}`}
+              >
+                Nạp hàng loạt
+              </button>
+              <button
+                onClick={() => setAddPanelMode('lookup')}
+                className={`px-2.5 py-1.5 text-xs border-l border-neutral-200 dark:border-neutral-800 ${addPanelMode === 'lookup' ? 'bg-indigo-500/20 text-indigo-300' : 'hover:bg-neutral-200 dark:hover:bg-neutral-800 text-neutral-400'}`}
+              >
+                Đối chiếu username
+              </button>
+            </div>
           </div>
 
-          {!showBulk ? (
+          {addPanelMode === 'single' && (
             <form onSubmit={handleAdd} className="space-y-3">
               <label className="block">
                 <span className="text-xs text-neutral-400 dark:text-neutral-400 flex items-center gap-1 mb-1">
@@ -1380,16 +1529,30 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                 </button>
               </div>
             </form>
-          ) : (
+          )}
+
+          {addPanelMode === 'bulk' && (
             <BulkImportPanel
               bulkText={bulkText}
               setBulkText={setBulkText}
               bulkRunning={bulkRunning}
               bulkLog={bulkLog}
+              bulkFailed={bulkFailed}
               bulkProgress={bulkProgress}
               onStart={confirmBulkImport}
+              onRetryFailed={confirmRetryFailedBulkImport}
               onStop={() => { bulkAbort.current = true }}
               bulkDelay={settings?.bulkDelay ?? 5}
+            />
+          )}
+
+          {addPanelMode === 'lookup' && (
+            <BulkUsernameLookupPanel
+              value={bulkLookupText}
+              onChange={setBulkLookupText}
+              result={bulkLookupResult}
+              onRun={handleBulkLookup}
+              onClear={() => { setBulkLookupText(''); setBulkLookupResult(null) }}
             />
           )}
         </section>
@@ -1536,7 +1699,29 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                           <span className={l.level === 'error' ? 'text-rose-400' : l.level === 'warn' ? 'text-amber-300' : 'text-emerald-300'}>{l.level}</span>
                         </div>
                         <div className="text-neutral-300 mt-0.5">{l.message}</div>
-                        {l.meta && <div className="text-neutral-500 mt-0.5 break-all">{JSON.stringify(l.meta)}</div>}
+                        {l.source === 'scheduler' && l.action === 'run' && Array.isArray(l.meta?.failures) && l.meta.failures.length > 0 ? (
+                          <div className="mt-1 pl-2 border-l border-rose-500/30 space-y-0.5 text-[11px]">
+                            {summarizeScheduleFailures(l.meta.failures).length > 0 && (
+                              <div className="text-amber-300">
+                                Nhóm lỗi: {summarizeScheduleFailures(l.meta.failures).map(g => `${g.reason} (${g.count})`).join(' · ')}
+                              </div>
+                            )}
+                            {l.meta.failures.slice(0, SCHEDULE_FAILURE_PREVIEW).map((f, idx) => (
+                              <div key={`${l.id}_af_${idx}`} className="text-rose-300 break-all">
+                                • {f.username ? `@${f.username}` : f.accountId}{f.token ? ` · ${f.token}` : ''} · {f.error}
+                              </div>
+                            ))}
+                            {(Number(l.meta?.failHidden || 0) > 0 || l.meta.failures.length > SCHEDULE_FAILURE_PREVIEW) && (
+                              <div className="text-neutral-500">+ {Math.max(Number(l.meta?.failHidden || 0), l.meta.failures.length - SCHEDULE_FAILURE_PREVIEW)} lỗi khác...</div>
+                            )}
+                          </div>
+                        ) : l.source === 'scheduler' && l.action === 'run' && Number(l.meta?.fail || 0) > 0 ? (
+                          <div className="mt-1 pl-2 border-l border-amber-500/30 text-[11px] text-amber-300">
+                            Log cũ: không có chi tiết token/account cho lỗi này.
+                          </div>
+                        ) : (
+                          l.meta && <div className="text-neutral-500 mt-0.5 break-all">{JSON.stringify(l.meta)}</div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1806,11 +1991,35 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                 ) : (
                   <div className="space-y-1 max-h-36 overflow-y-auto">
                     {scheduleLogs.map((l) => (
-                      <div key={l.id} className="text-xs font-mono text-neutral-300 flex items-center justify-between gap-2">
-                        <span>{new Date(l.at).toLocaleString()} · {l.taskId} · {l.type}</span>
-                        {l.type === 'run'
-                          ? <span className={l.fail > 0 ? 'text-amber-300' : 'text-emerald-300'}>ok {l.success} / fail {l.fail} · {l.durationSec}s</span>
-                          : <span className="text-neutral-400">{l.message || ''}</span>}
+                      <div key={l.id} className="text-xs font-mono text-neutral-300">
+                        <div className="flex items-center justify-between gap-2">
+                          <span>{new Date(l.at).toLocaleString()} · {l.taskId} · {l.type}</span>
+                          {l.type === 'run'
+                            ? <span className={l.fail > 0 ? 'text-amber-300' : 'text-emerald-300'}>ok {l.success} / fail {l.fail} · {l.durationSec}s</span>
+                            : <span className="text-neutral-400">{l.message || ''}</span>}
+                        </div>
+                        {l.type === 'run' && l.fail > 0 && Array.isArray(l.failures) && l.failures.length > 0 && (
+                          <div className="mt-1 pl-2 border-l border-rose-500/30 space-y-0.5 text-[11px]">
+                            {summarizeScheduleFailures(l.failures).length > 0 && (
+                              <div className="text-amber-300">
+                                Nhóm lỗi: {summarizeScheduleFailures(l.failures).map(g => `${g.reason} (${g.count})`).join(' · ')}
+                              </div>
+                            )}
+                            {l.failures.slice(0, SCHEDULE_FAILURE_PREVIEW).map((f, idx) => (
+                              <div key={`${l.id}_f_${idx}`} className="text-rose-300 break-all">
+                                • {f.username ? `@${f.username}` : f.accountId}{f.token ? ` · ${f.token}` : ''} · {f.error}
+                              </div>
+                            ))}
+                            {(l.failHidden > 0 || l.failures.length > SCHEDULE_FAILURE_PREVIEW) && (
+                              <div className="text-neutral-500">+ {Math.max(l.failHidden || 0, l.failures.length - SCHEDULE_FAILURE_PREVIEW)} lỗi khác...</div>
+                            )}
+                          </div>
+                        )}
+                        {l.type === 'run' && l.fail > 0 && (!Array.isArray(l.failures) || l.failures.length === 0) && (
+                          <div className="mt-1 pl-2 border-l border-amber-500/30 text-[11px] text-amber-300">
+                            Log cũ: không có chi tiết token/account cho lỗi này.
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1976,6 +2185,8 @@ function SettingsPanel({ settings, setSettings }) {
   const [savedAt, setSavedAt] = useState(0)
   const [testing, setTesting] = useState(false)
   const [testMsg, setTestMsg] = useState('')
+  const [tokenCacheInput, setTokenCacheInput] = useState('')
+  const [tokenCacheMsg, setTokenCacheMsg] = useState('')
 
   const isTestUrl = /\/webhook-test\//.test(webhookUrl)
 
@@ -1998,6 +2209,24 @@ function SettingsPanel({ settings, setSettings }) {
     } catch (e) {
       setTestMsg('Lỗi: ' + e.message)
     } finally { setTesting(false) }
+  }
+
+  const handleClearTokenCache = () => {
+    const token = tokenCacheInput.trim()
+    if (!token) {
+      setTokenCacheMsg('Vui lòng nhập token')
+      return
+    }
+    if (token.length < 8) {
+      setTokenCacheMsg('Token quá ngắn (cần ít nhất 8 ký tự)')
+      return
+    }
+    const tail = token.slice(-8)
+    const key = `td.cache.v1.me:${tail}`
+    const existed = localStorage.getItem(key) != null
+    localStorage.removeItem(key)
+    setTokenCacheMsg(existed ? `Đã xóa cache me theo đuôi token: ${tail}` : `Không tìm thấy cache me theo đuôi token: ${tail}`)
+    setTimeout(() => setTokenCacheMsg(''), 3000)
   }
 
   return (
@@ -2042,6 +2271,24 @@ function SettingsPanel({ settings, setSettings }) {
             Áp dụng cho: Nạp hàng loạt, Refresh All, Lấy posts, Lấy insights. Tối thiểu 1 giây.
           </p>
         </label>
+        <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-3 space-y-2">
+          <div className="text-xs text-neutral-300 font-medium">Clear cache theo token</div>
+          <div className="flex items-center gap-2">
+            <input
+              value={tokenCacheInput}
+              onChange={(e) => setTokenCacheInput(e.target.value)}
+              placeholder="Dán token để xóa cache me (dùng đuôi 8 ký tự)"
+              className="flex-1 px-3 py-2 rounded-lg bg-neutral-100 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 focus:border-indigo-500 outline-none text-xs font-mono"
+            />
+            <button
+              onClick={handleClearTokenCache}
+              className="px-3 py-2 rounded-lg border border-rose-800 text-rose-400 hover:bg-rose-500/10 text-xs"
+            >
+              Xóa cache token
+            </button>
+          </div>
+          {tokenCacheMsg && <div className="text-xs text-neutral-400">{tokenCacheMsg}</div>}
+        </div>
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <p className="text-xs text-neutral-400 dark:text-neutral-500">
             Hiện tại: <code className="px-1 rounded bg-neutral-200 dark:bg-neutral-800">{settings.webhookUrl || '(chưa đặt)'}</code>
@@ -2320,7 +2567,80 @@ function CacheSizeChip({ label, prefix, onClear }) {
   )
 }
 
-function BulkImportPanel({ bulkText, setBulkText, bulkRunning, bulkLog, bulkProgress, onStart, onStop, bulkDelay = 5 }) {
+function BulkUsernameLookupPanel({ value, onChange, result, onRun, onClear }) {
+  const parsedCount = parseBulkUsernames(value).length
+  const previewLimit = 100
+  const missingPreview = result?.missingUsernames?.slice(0, previewLimit) || []
+  const hiddenMissing = Math.max(0, (result?.missingUsernames?.length || 0) - missingPreview.length)
+
+  return (
+    <div className="space-y-3">
+      <label className="block">
+        <span className="text-xs text-neutral-400 dark:text-neutral-400 mb-1 block">Dán danh sách username (mỗi dòng 1 username, chấp nhận @username hoặc phân tách bằng dấu phẩy)</span>
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={6}
+          placeholder={'@user_a\nuser_b\nuser_c'}
+          className="w-full px-3 py-2 rounded-lg bg-neutral-100 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 focus:border-indigo-500 outline-none text-sm font-mono resize-y"
+        />
+      </label>
+
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-neutral-400 dark:text-neutral-500">{parsedCount} username hợp lệ (đã chuẩn hoá + bỏ trùng)</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onClear}
+            disabled={!value.trim() && !result}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-800 disabled:opacity-50 text-sm"
+          >
+            <X className="w-4 h-4" /> Clear input
+          </button>
+          <button
+            onClick={onRun}
+            disabled={parsedCount === 0}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-60 text-sm font-medium"
+          >
+            <Search className="w-4 h-4" /> Kiểm tra
+          </button>
+        </div>
+      </div>
+
+      {result && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-800">Tổng nhập: {result.inputCount}</span>
+            <span className="px-2 py-1 rounded border border-emerald-500/40 text-emerald-300">Tồn tại: {result.matchedUsernames.length}</span>
+            <span className="px-2 py-1 rounded border border-rose-500/40 text-rose-300">Thiếu: {result.missingUsernames.length}</span>
+            {result.missingUsernames.length > 0 && (
+              <CopyBtn text={result.missingUsernames.join('\n')} label="Copy thiếu" />
+            )}
+          </div>
+
+          {result.missingUsernames.length === 0 ? (
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs text-emerald-300">
+              Không phát hiện username nào bị thiếu trong tool.
+            </div>
+          ) : (
+            <div className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-3 space-y-1">
+              <div className="text-xs font-medium text-rose-300">Username thiếu ({result.missingUsernames.length})</div>
+              <div className="max-h-52 overflow-y-auto space-y-1">
+                {missingPreview.map((u) => (
+                  <div key={u} className="text-xs font-mono text-rose-300 break-all">• @{u}</div>
+                ))}
+                {hiddenMissing > 0 && (
+                  <div className="text-xs text-neutral-500">+ {hiddenMissing} username nữa...</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function BulkImportPanel({ bulkText, setBulkText, bulkRunning, bulkLog, bulkFailed = [], bulkProgress, onStart, onRetryFailed, onStop, bulkDelay = 5 }) {
   const logRef = useRef(null)
   const [summary, setSummary] = useState(null)
   const prevRunning = useRef(false)
@@ -2384,8 +2704,28 @@ function BulkImportPanel({ bulkText, setBulkText, bulkRunning, bulkLog, bulkProg
               ? <><RefreshCw className="w-4 h-4 animate-spin" /> {bulkProgress.done}/{bulkProgress.total}</>
               : <><Plus className="w-4 h-4" /> Bắt đầu nạp</>}
           </button>
+          {!bulkRunning && bulkFailed.length > 0 && (
+            <button
+              onClick={() => { setSummary(null); onRetryFailed?.() }}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-amber-500/40 text-amber-300 hover:bg-amber-500/10 text-sm"
+            >
+              <RefreshCw className="w-4 h-4" /> Thử lại token lỗi ({bulkFailed.length})
+            </button>
+          )}
         </div>
       </div>
+      {bulkFailed.length > 0 && !bulkRunning && (
+        <div className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-3 space-y-1">
+          <div className="text-xs font-medium text-rose-300">Token lỗi ({bulkFailed.length})</div>
+          <div className="space-y-1 max-h-28 overflow-y-auto">
+            {bulkFailed.map((item, i) => (
+              <div key={`${item.token}_${i}`} className="text-xs font-mono text-rose-300 break-all">
+                • {maskToken(item.token)} — {item.error}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {bulkLog.length > 0 && (
         <div ref={logRef} className="max-h-40 overflow-y-auto rounded-lg bg-neutral-100 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 p-3 space-y-1">
           {bulkLog.map((l, i) => (
