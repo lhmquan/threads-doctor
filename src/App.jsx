@@ -4,13 +4,13 @@ import {
   Download, ExternalLink, Filter, Home, Image as ImageIcon, KeyRound, List, Lock, MessageSquare, Moon, Plus,
   RefreshCw, Search, Send, Settings, Sparkles, Square, Stethoscope, Sun, Trash2, TrendingDown, TrendingUp, User, X,
 } from 'lucide-react'
-import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetchReplies, fetchRepliesPage, postReply, resolveThreadsUrl, searchKeyword, maskToken } from './lib/threads.js'
+import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetchReplies, fetchRepliesPage, postReply, resolveThreadsUrl, searchKeyword, maskToken, tokenFingerprint } from './lib/threads.js'
 import { generateReply } from './lib/ai.js'
 import { parseThreadsUrl } from './lib/threads-url.js'
 import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline, loadSchedules, saveSchedules, loadScheduleLogs, saveScheduleLogs, loadAppLogs, saveAppLogs } from './lib/storage.js'
 import { cacheClear, cacheGet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
-const APP_VERSION = '0.12.0'
+const APP_VERSION = '0.12.1'
 const MAX_SCHEDULE_LOGS = 200
 const MAX_APP_LOGS = 1500
 const MAX_SCHEDULE_FAILURE_DETAILS = 12
@@ -230,6 +230,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const [scheduledTasks, setScheduledTasks] = useState(() => loadSchedules())
   const [scheduleLogs, setScheduleLogs] = useState(() => loadScheduleLogs().slice(0, MAX_SCHEDULE_LOGS))
   const [appLogs, setAppLogs] = useState(() => loadAppLogs().slice(0, MAX_APP_LOGS))
+  const [expandedScheduleFailures, setExpandedScheduleFailures] = useState(() => new Set())
+  const [expandedAppLogFailures, setExpandedAppLogFailures] = useState(() => new Set())
   const timersRef = useRef(new Map())
   const taskRunLockRef = useRef(new Set())
   const runTaskRef = useRef(null)
@@ -262,6 +264,24 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     const pad = (n) => String(n).padStart(2, '0')
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
   }
+
+  const toggleScheduleFailureExpand = useCallback((logId) => {
+    setExpandedScheduleFailures((prev) => {
+      const next = new Set(prev)
+      if (next.has(logId)) next.delete(logId)
+      else next.add(logId)
+      return next
+    })
+  }, [])
+
+  const toggleAppLogFailureExpand = useCallback((logId) => {
+    setExpandedAppLogFailures((prev) => {
+      const next = new Set(prev)
+      if (next.has(logId)) next.delete(logId)
+      else next.add(logId)
+      return next
+    })
+  }, [])
 
   const clearTaskTimer = useCallback((taskId) => {
     const timer = timersRef.current.get(taskId)
@@ -916,6 +936,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
 
   const clearAppLogs = useCallback(() => {
     setAppLogs([])
+    setExpandedAppLogFailures(new Set())
     setScheduleMsg('Đã xóa toàn bộ app logs')
   }, [])
 
@@ -946,6 +967,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       setAccounts(prev => {
         const exists = prev.some(a => a.username === info.username)
         if (exists) return prev.map(a => a.username === info.username ? { ...next, addedAt: a.addedAt || next.addedAt } : a)
+        const tokenDup = prev.find(a => a.token === token.trim() && a.id !== info.id)
+        if (tokenDup) return [next, ...prev.filter(a => a.id !== tokenDup.id)]
         return [next, ...prev]
       })
       appendAppLog({
@@ -1034,7 +1057,10 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
 
     cacheClear(`posts:${acc.id}:`)
     cacheClear(`insights:${acc.id}`)
-    if (acc.token) cacheClear(`me:${acc.token.slice(-8)}`)
+    if (acc.token) {
+      cacheClear(`me:${tokenFingerprint(acc.token)}`)
+      cacheClear(`me:${acc.token.slice(-8)}`)
+    }
 
     postIds.forEach((postId) => {
       cacheClear(`post:${postId}`)
@@ -1205,10 +1231,20 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           error: '',
         }
         setAccounts(prev => {
-          const exists = prev.some(a => a.username === info.username)
+          const exists = prev.some(a => a.id === info.id)
           if (exists) {
             setBulkLog(p => [...p, { token: t, ok: true, msg: `Cập nhật: @${info.username}` }])
-            return prev.map(a => a.username === info.username ? { ...updated, addedAt: a.addedAt || updated.addedAt } : a)
+            return prev.map(a => a.id === info.id ? { ...updated, addedAt: a.addedAt || updated.addedAt } : a)
+          }
+          const usernameDup = prev.find(a => a.username === info.username && a.id !== info.id)
+          if (usernameDup) {
+            setBulkLog(p => [...p, { token: t, ok: true, msg: `Cập nhật (username match): @${info.username}` }])
+            return prev.map(a => a.id === usernameDup.id ? { ...updated, addedAt: a.addedAt || updated.addedAt } : a)
+          }
+          const tokenDup = prev.find(a => a.token === t && a.id !== info.id)
+          if (tokenDup) {
+            setBulkLog(p => [...p, { token: t, ok: true, msg: `@${info.username} (thay thế token trùng)` }])
+            return [updated, ...prev.filter(a => a.id !== tokenDup.id)]
           }
           setBulkLog(p => [...p, { token: t, ok: true, msg: `@${info.username}` }])
           return [updated, ...prev]
@@ -1348,7 +1384,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => { navigate('/'); setStatusFilter('all'); setSortBy('default'); setFollowersMin(''); setFollowersMax(''); setQuery(''); setPage(1); setShowSettings(false); setAddPanelMode('single'); setBulkText(''); setBulkLookupText(''); setBulkLookupResult(null); setBulkLog([]); setBulkFailed([]); setAddError(''); setUrlMsg('') }}
+              onClick={() => { navigate('/'); setStatusFilter('all'); setSortBy('default'); setFollowersMin(''); setFollowersMax(''); setQuery(''); setPage(1); setShowSettings(false); setAddPanelMode('single'); setBulkText(''); setBulkLookupText(''); setBulkLookupResult(null); setBulkLog([]); setBulkFailed([]); setExpandedScheduleFailures(new Set()); setExpandedAppLogFailures(new Set()); setAddError(''); setUrlMsg('') }}
               className="p-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
               title="Trang chủ"
             >
@@ -1706,13 +1742,20 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                                 Nhóm lỗi: {summarizeScheduleFailures(l.meta.failures).map(g => `${g.reason} (${g.count})`).join(' · ')}
                               </div>
                             )}
-                            {l.meta.failures.slice(0, SCHEDULE_FAILURE_PREVIEW).map((f, idx) => (
+                            {(expandedAppLogFailures.has(l.id) ? l.meta.failures : l.meta.failures.slice(0, SCHEDULE_FAILURE_PREVIEW)).map((f, idx) => (
                               <div key={`${l.id}_af_${idx}`} className="text-rose-300 break-all">
                                 • {f.username ? `@${f.username}` : f.accountId}{f.token ? ` · ${f.token}` : ''} · {f.error}
                               </div>
                             ))}
                             {(Number(l.meta?.failHidden || 0) > 0 || l.meta.failures.length > SCHEDULE_FAILURE_PREVIEW) && (
-                              <div className="text-neutral-500">+ {Math.max(Number(l.meta?.failHidden || 0), l.meta.failures.length - SCHEDULE_FAILURE_PREVIEW)} lỗi khác...</div>
+                              <button
+                                onClick={() => toggleAppLogFailureExpand(l.id)}
+                                className="text-indigo-300 hover:text-indigo-200 underline"
+                              >
+                                {expandedAppLogFailures.has(l.id)
+                                  ? 'Thu gọn lỗi'
+                                  : `+ ${Math.max(Number(l.meta?.failHidden || 0), l.meta.failures.length - SCHEDULE_FAILURE_PREVIEW)} lỗi khác... (click để xem tất cả)`}
+                              </button>
                             )}
                           </div>
                         ) : l.source === 'scheduler' && l.action === 'run' && Number(l.meta?.fail || 0) > 0 ? (
@@ -2005,13 +2048,20 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                                 Nhóm lỗi: {summarizeScheduleFailures(l.failures).map(g => `${g.reason} (${g.count})`).join(' · ')}
                               </div>
                             )}
-                            {l.failures.slice(0, SCHEDULE_FAILURE_PREVIEW).map((f, idx) => (
+                            {(expandedScheduleFailures.has(l.id) ? l.failures : l.failures.slice(0, SCHEDULE_FAILURE_PREVIEW)).map((f, idx) => (
                               <div key={`${l.id}_f_${idx}`} className="text-rose-300 break-all">
                                 • {f.username ? `@${f.username}` : f.accountId}{f.token ? ` · ${f.token}` : ''} · {f.error}
                               </div>
                             ))}
                             {(l.failHidden > 0 || l.failures.length > SCHEDULE_FAILURE_PREVIEW) && (
-                              <div className="text-neutral-500">+ {Math.max(l.failHidden || 0, l.failures.length - SCHEDULE_FAILURE_PREVIEW)} lỗi khác...</div>
+                              <button
+                                onClick={() => toggleScheduleFailureExpand(l.id)}
+                                className="text-indigo-300 hover:text-indigo-200 underline"
+                              >
+                                {expandedScheduleFailures.has(l.id)
+                                  ? 'Thu gọn lỗi'
+                                  : `+ ${Math.max(l.failHidden || 0, l.failures.length - SCHEDULE_FAILURE_PREVIEW)} lỗi khác... (click để xem tất cả)`}
+                              </button>
                             )}
                           </div>
                         )}
@@ -2221,11 +2271,14 @@ function SettingsPanel({ settings, setSettings }) {
       setTokenCacheMsg('Token quá ngắn (cần ít nhất 8 ký tự)')
       return
     }
+    const fp = tokenFingerprint(token)
     const tail = token.slice(-8)
-    const key = `td.cache.v1.me:${tail}`
-    const existed = localStorage.getItem(key) != null
-    localStorage.removeItem(key)
-    setTokenCacheMsg(existed ? `Đã xóa cache me theo đuôi token: ${tail}` : `Không tìm thấy cache me theo đuôi token: ${tail}`)
+    const keyNew = `td.cache.v1.me:${fp}`
+    const keyLegacy = `td.cache.v1.me:${tail}`
+    const existed = localStorage.getItem(keyNew) != null || localStorage.getItem(keyLegacy) != null
+    localStorage.removeItem(keyNew)
+    localStorage.removeItem(keyLegacy)
+    setTokenCacheMsg(existed ? `Đã xóa cache me (fp: ${fp}, legacy: ${tail})` : `Không tìm thấy cache me cho token này`)
     setTimeout(() => setTokenCacheMsg(''), 3000)
   }
 

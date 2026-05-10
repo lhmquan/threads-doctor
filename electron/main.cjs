@@ -10,7 +10,8 @@ function getIndexPath() {
   return path.join(__dirname, '../dist/index.html')
 }
 
-function createContextMenu(params, webContents) {
+function createContextMenu(params, win) {
+  const webContents = win.webContents
   if (params.isEditable) {
     return Menu.buildFromTemplate([
       { role: 'undo' },
@@ -36,7 +37,7 @@ function createContextMenu(params, webContents) {
     },
     {
       label: 'Refresh',
-      click: () => webContents.reload(),
+      click: () => win.loadFile(getIndexPath()),
     },
     { type: 'separator' },
     { role: 'copy' },
@@ -57,7 +58,7 @@ function createWindow() {
   })
   win.loadFile(getIndexPath())
   win.webContents.on('context-menu', (_event, params) => {
-    const menu = createContextMenu(params, win.webContents)
+    const menu = createContextMenu(params, win)
     menu.popup({ window: win })
   })
   win.setMenuBarVisibility(false)

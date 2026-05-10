@@ -71,12 +71,27 @@ async function callWebhook({ webhookUrl, apiKey, payload }) {
   return json
 }
 
+function tokenFingerprint(token) {
+  let h = 0
+  for (let i = 0; i < token.length; i++) {
+    h = ((h << 5) - h + token.charCodeAt(i)) | 0
+  }
+  return (h >>> 0).toString(36)
+}
+
 export async function fetchMe(token, { settings, skipCache = false } = {}) {
-  const key = `me:${token.slice(-8)}`
+  const key = `me:${tokenFingerprint(token)}`
+  const legacyKey = `me:${token.slice(-8)}`
   const ttl = getTTL(settings)
+
   if (!skipCache) {
     const hit = cacheGet(key, ttl.profile)
     if (hit) return hit
+    const legacyHit = cacheGet(legacyKey, ttl.profile)
+    if (legacyHit && legacyHit.id) {
+      cacheSet(key, legacyHit)
+      return legacyHit
+    }
   }
 
   const url = buildGraphUrl('/me', { fields: ME_FIELDS, access_token: token })
@@ -90,6 +105,8 @@ export async function fetchMe(token, { settings, skipCache = false } = {}) {
   cacheSet(key, data)
   return data
 }
+
+export { tokenFingerprint }
 
 const POST_FIELDS_LIST = 'id,media_type,media_url,thumbnail_url,permalink,text,timestamp,shortcode,is_quote_post'
 const POST_FIELDS_DETAIL = 'id,media_type,media_url,thumbnail_url,permalink,username,text,timestamp,shortcode,children,is_quote_post,quoted_post,reposted_post,link_attachment_url,gif_url,topic_tag'
