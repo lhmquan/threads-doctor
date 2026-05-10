@@ -313,6 +313,17 @@ export async function resolveThreadsUrl(url, { settings } = {}) {
   return result
 }
 
+export async function repostPost(postId, token, { settings }) {
+  const url = buildGraphUrl(`/${postId}/repost`, { access_token: token })
+  const data = await callWebhook({
+    webhookUrl: getWebhookUrl(settings),
+    apiKey: settings?.apiKey,
+    payload: { action: 'repostPost', method: 'POST', url },
+  })
+  if (!data?.id) throw new Error('Repost thất bại — không nhận được ID')
+  return data
+}
+
 export async function searchKeyword(token, { settings, q, searchType, searchMode, mediaType, authorUsername, since, until, limit, skipCache = false } = {}) {
   const keyParts = [q, searchType, searchMode, mediaType, authorUsername, since, until, limit].filter(Boolean).join(':')
   const key = `search:${keyParts}`

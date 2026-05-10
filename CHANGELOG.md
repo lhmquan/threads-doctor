@@ -1,5 +1,36 @@
 # Changelog — Threads Doctor
 
+## v0.13.0 — 2026-05-10
+
+### Buff Account (Boss/Worker)
+- Thêm route `/buff` và flow buff repost: chọn boss + worker, worker repost bài của boss qua Threads repost API
+- Hỗ trợ 2 chế độ chọn bài: `Random` (1 trong 10 bài gần nhất) hoặc `Chỉ định` (tick nhiều bài, mỗi lần chạy random 1 bài trong nhóm đã chọn)
+- Hỗ trợ chạy `1 lần` hoặc `lặp chu kỳ` (phút/giờ/ngày), delay random min/max giữa từng worker
+- Buff task chạy nền, không phụ thuộc trang đang mở; đổi trang vẫn tiếp tục xử lý
+- Thêm realtime global notification hiển thị tiến trình buff đang chạy (`X/Y workers`)
+- Nút `Hủy` khi task đang running giờ dừng thực sự (abort loop), không chạy hết danh sách worker nữa
+
+### Buff logs & permalink UX
+- Logs buff hiển thị permalink bài repost để click mở trực tiếp
+- Thêm `Copy Link` cạnh permalink trong logs để copy nhanh
+- Mở rộng hiển thị lỗi chi tiết có thể click `xem tất cả / thu gọn`
+
+### Favourite workers + Context menu
+- Thêm danh sách worker favourite persist localStorage (`td.buff_fav_workers.v1`)
+- Trang Buff hỗ trợ lọc nguồn worker theo `Tất cả / Favourite`, có tìm kiếm username cho cả Boss và Worker
+- Worker chỉ lấy nhóm account `bình thường` (loại account lỗi/bị khóa/bị block/bất thường)
+- Context menu trên AccountCard thêm action:
+  - `Add to favourite workers` (toggle add/remove)
+  - `Buff me` (đi thẳng `/buff` và preselect account làm boss)
+- Account đã nằm trong favourite worker list có icon ngay cạnh username trên card, click icon để toggle add/remove
+
+### Ổn định mapping token/account
+- Fix collision cache `fetchMe`: bỏ key theo đuôi 8 ký tự, chuyển sang token fingerprint để tránh map nhầm account
+- Luồng add/bulk import gia cố dedupe theo `id/token`, giảm nguy cơ record trùng token
+
+### Electron context menu
+- Fix menu `Refresh` chuột phải: reload đúng `index.html`, tránh trạng thái trắng màn hình trên SPA routes
+
 ## v0.12.1 — 2026-05-09
 
 ### Bulk username đối chiếu

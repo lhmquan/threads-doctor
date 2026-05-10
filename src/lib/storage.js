@@ -57,10 +57,44 @@ export function saveAppLogs(list) {
 }
 
 const FOLLOWERS_KEY = 'td.followers_baseline'
+const BUFF_SCHEDULES_KEY = 'td.buff_schedules.v1'
+const BUFF_LOGS_KEY = 'td.buff_logs.v1'
 
 export function loadFollowersBaseline() {
   try { return JSON.parse(localStorage.getItem(FOLLOWERS_KEY) || '{}') } catch { return {} }
 }
 export function saveFollowersBaseline(data) {
   localStorage.setItem(FOLLOWERS_KEY, JSON.stringify(data))
+}
+
+export function loadBuffSchedules() {
+  try {
+    const data = JSON.parse(localStorage.getItem(BUFF_SCHEDULES_KEY) || '[]')
+    return Array.isArray(data) ? data : []
+  } catch { return [] }
+}
+export function saveBuffSchedules(list) {
+  localStorage.setItem(BUFF_SCHEDULES_KEY, JSON.stringify(Array.isArray(list) ? list : []))
+}
+
+export function loadBuffLogs() {
+  try {
+    const data = JSON.parse(localStorage.getItem(BUFF_LOGS_KEY) || '[]')
+    return Array.isArray(data) ? data : []
+  } catch { return [] }
+}
+export function saveBuffLogs(list) {
+  localStorage.setItem(BUFF_LOGS_KEY, JSON.stringify(Array.isArray(list) ? list : []))
+}
+
+const BUFF_FAVOURITE_WORKERS_KEY = 'td.buff_fav_workers.v1'
+
+export function loadBuffFavouriteWorkers() {
+  try {
+    const data = JSON.parse(localStorage.getItem(BUFF_FAVOURITE_WORKERS_KEY) || '[]')
+    return Array.isArray(data) ? data : []
+  } catch { return [] }
+}
+export function saveBuffFavouriteWorkers(list) {
+  localStorage.setItem(BUFF_FAVOURITE_WORKERS_KEY, JSON.stringify(Array.isArray(list) ? list : []))
 }

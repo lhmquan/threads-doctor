@@ -4,13 +4,13 @@ import {
   Download, ExternalLink, Filter, Home, Image as ImageIcon, KeyRound, List, Lock, MessageSquare, Moon, Plus,
   RefreshCw, Search, Send, Settings, Sparkles, Square, Stethoscope, Sun, Trash2, TrendingDown, TrendingUp, User, X,
 } from 'lucide-react'
-import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetchReplies, fetchRepliesPage, postReply, resolveThreadsUrl, searchKeyword, maskToken, tokenFingerprint } from './lib/threads.js'
+import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetchReplies, fetchRepliesPage, postReply, repostPost, resolveThreadsUrl, searchKeyword, maskToken, tokenFingerprint } from './lib/threads.js'
 import { generateReply } from './lib/ai.js'
 import { parseThreadsUrl } from './lib/threads-url.js'
-import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline, loadSchedules, saveSchedules, loadScheduleLogs, saveScheduleLogs, loadAppLogs, saveAppLogs } from './lib/storage.js'
+import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline, loadSchedules, saveSchedules, loadScheduleLogs, saveScheduleLogs, loadAppLogs, saveAppLogs, loadBuffSchedules, saveBuffSchedules, loadBuffLogs, saveBuffLogs, loadBuffFavouriteWorkers, saveBuffFavouriteWorkers } from './lib/storage.js'
 import { cacheClear, cacheGet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
-const APP_VERSION = '0.12.1'
+const APP_VERSION = '0.13.0'
 const MAX_SCHEDULE_LOGS = 200
 const MAX_APP_LOGS = 1500
 const MAX_SCHEDULE_FAILURE_DETAILS = 12
@@ -126,11 +126,218 @@ export default function Root() {
   const settings = loadSettings()
   const accounts = loadAccounts()
   const [followersBaseline, setFollowersBaseline] = useState(() => loadFollowersBaseline())
+  const [buffFavWorkers, setBuffFavWorkers] = useState(() => loadBuffFavouriteWorkers())
+  const buffMeTarget = useRef(null)
+
+  const [buffSchedules, setBuffSchedules] = useState(() => loadBuffSchedules())
+  const [buffLogs, setBuffLogs] = useState(() => loadBuffLogs().slice(0, MAX_BUFF_LOGS))
+  const [buffRunning, setBuffRunning] = useState(false)
+  const [buffProgress, setBuffProgress] = useState(null)
+  const buffTimersRef = useRef(new Map())
+  const buffRunLockRef = useRef(new Set())
+  const runBuffTaskRef = useRef(null)
+  const buffAbortRef = useRef(false)
 
   useEffect(() => { saveFollowersBaseline(followersBaseline) }, [followersBaseline])
+  useEffect(() => { saveBuffSchedules(buffSchedules) }, [buffSchedules])
+  useEffect(() => { saveBuffLogs(buffLogs) }, [buffLogs])
+
+  const appendBuffLog = useCallback((entry) => {
+    setBuffLogs(prev => [{ id: `buff_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, ...entry }, ...prev].slice(0, MAX_BUFF_LOGS))
+  }, [])
+
+  const clearBuffTimer = useCallback((taskId) => {
+    const timer = buffTimersRef.current.get(taskId)
+    if (timer) { clearTimeout(timer); buffTimersRef.current.delete(taskId) }
+  }, [])
+
+  const armBuffTask = useCallback((task) => {
+    if (!task || task.status !== 'active' || !task.nextRunAt) return
+    clearBuffTimer(task.id)
+    const delay = Math.max(0, task.nextRunAt - Date.now())
+    const timer = setTimeout(() => { runBuffTaskRef.current?.(task.id) }, delay)
+    buffTimersRef.current.set(task.id, timer)
+  }, [clearBuffTimer])
+
+  const runBuffTask = useCallback(async (taskId) => {
+    if (buffRunLockRef.current.has(taskId)) return
+    const task = buffSchedules.find(t => t.id === taskId)
+    if (!task || task.status !== 'active') return
+
+    buffRunLockRef.current.add(taskId)
+    setBuffSchedules(prev => prev.map(t => t.id === taskId ? { ...t, status: 'running', updatedAt: Date.now() } : t))
+    setBuffRunning(true)
+    setBuffProgress({ taskId, done: 0, total: 0, status: 'fetching post' })
+
+    const startedAt = Date.now()
+    const bossAcc = accounts.find(a => a.id === task.bossAccountId)
+    let chosenPostId = null
+    let chosenPermalink = null
+
+    try {
+      if (task.postMode === 'random') {
+        const posts = await fetchPosts(task.bossAccountId, bossAcc?.token, { settings, limit: 10, skipCache: true })
+        if (posts && posts.length > 0) {
+          const chosen = posts[Math.floor(Math.random() * posts.length)]
+          chosenPostId = chosen.id
+          chosenPermalink = chosen.permalink || null
+        }
+      } else {
+        const pool = task.selectedPostIds || []
+        if (pool.length > 0) {
+          chosenPostId = pool[Math.floor(Math.random() * pool.length)]
+          try {
+            const detail = await fetchPost(chosenPostId, bossAcc?.token, { settings })
+            chosenPermalink = detail?.permalink || null
+          } catch {}
+        }
+      }
+    } catch {}
+
+    if (!chosenPostId) {
+      appendBuffLog({ at: Date.now(), taskId, type: 'run', success: 0, fail: 0, durationSec: 0, status: 'fail', message: 'Không tìm được post để repost', failures: [], postId: null, permalink: null })
+      setBuffSchedules(prev => prev.map(t => t.id === taskId ? { ...t, status: task.mode === 'once' ? 'completed' : 'active', updatedAt: Date.now(), lastResult: { ok: 0, fail: 0, durationSec: 0, postId: null } } : t))
+      buffRunLockRef.current.delete(taskId)
+      setBuffRunning(false)
+      setBuffProgress(null)
+      return
+    }
+
+    const workers = accounts.filter(a => task.workerIds.includes(a.id))
+    let ok = 0, fail = 0
+    const failureDetails = []
+    setBuffProgress({ taskId, done: 0, total: workers.length, status: 'reposting' })
+    buffAbortRef.current = false
+
+    for (let i = 0; i < workers.length; i++) {
+      if (buffAbortRef.current) break
+      const w = workers[i]
+      try {
+        await repostPost(chosenPostId, w.token, { settings })
+        ok++
+      } catch (err) {
+        fail++
+        if (failureDetails.length < MAX_BUFF_FAILURE_DETAILS) {
+          failureDetails.push({
+            accountId: w.id,
+            username: w.username || null,
+            token: w.token ? maskToken(w.token) : null,
+            error: compactErrorMessage(err?.message),
+          })
+        }
+      }
+      setBuffProgress({ taskId, done: i + 1, total: workers.length, status: 'reposting' })
+      if (i < workers.length - 1 && !buffAbortRef.current) {
+        const dMin = Math.max(1, Number(task.delayMin) || 3)
+        const dMax = Math.max(dMin, Number(task.delayMax) || 8)
+        const randomDelay = (dMin + Math.random() * (dMax - dMin)) * 1000
+        await new Promise(r => setTimeout(r, randomDelay))
+      }
+    }
+
+    const endedAt = Date.now()
+    const durationSec = Math.round((endedAt - startedAt) / 1000)
+    const runStatus = fail > 0 ? (ok > 0 ? 'partial' : 'fail') : 'ok'
+
+    appendBuffLog({
+      at: endedAt,
+      taskId,
+      type: 'run',
+      postId: chosenPostId,
+      permalink: chosenPermalink,
+      workerCount: workers.length,
+      success: ok,
+      fail,
+      durationSec,
+      status: runStatus,
+      failures: failureDetails,
+      failHidden: Math.max(0, fail - failureDetails.length),
+    })
+
+    let taskAfter = null
+    setBuffSchedules(prev => prev.map(t => {
+      if (t.id !== taskId) return t
+      const base = { ...t, updatedAt: endedAt, lastRunAt: endedAt, runCount: (t.runCount || 0) + 1, lastResult: { ok, fail, durationSec, postId: chosenPostId, permalink: chosenPermalink } }
+      if (t.mode === 'once') { taskAfter = { ...base, status: 'completed', nextRunAt: null }; return taskAfter }
+      const intervalMs = t.intervalMs || 60000
+      const nextRunAt = endedAt + intervalMs
+      taskAfter = { ...base, status: 'active', nextRunAt }
+      return taskAfter
+    }))
+
+    if (taskAfter?.mode === 'repeat' && taskAfter.status === 'active' && taskAfter.nextRunAt) {
+      armBuffTask(taskAfter)
+    } else {
+      clearBuffTimer(taskId)
+    }
+
+    buffRunLockRef.current.delete(taskId)
+    setBuffRunning(false)
+    setBuffProgress(null)
+  }, [accounts, appendBuffLog, armBuffTask, buffSchedules, clearBuffTimer, settings])
+
+  useEffect(() => { runBuffTaskRef.current = runBuffTask }, [runBuffTask])
+
+  useEffect(() => {
+    const now = Date.now()
+    buffSchedules.forEach(task => {
+      if (task.status === 'active' && task.nextRunAt) {
+        if (task.nextRunAt <= now && task.mode === 'once') {
+          setBuffSchedules(prev => prev.map(t => t.id === task.id ? { ...t, status: 'completed' } : t))
+        } else {
+          armBuffTask(task)
+        }
+      }
+    })
+    return () => { for (const timer of buffTimersRef.current.values()) clearTimeout(timer) }
+  }, [])
+
+  const createBuffTask = useCallback((taskData) => {
+    setBuffSchedules(prev => [taskData, ...prev])
+    if (taskData.mode === 'once') {
+      setTimeout(() => runBuffTaskRef.current?.(taskData.id), 100)
+    } else {
+      armBuffTask(taskData)
+    }
+  }, [armBuffTask])
+
+  const cancelBuffTask = useCallback((taskId) => {
+    buffAbortRef.current = true
+    clearBuffTimer(taskId)
+    setBuffSchedules(prev => prev.map(t => t.id === taskId ? { ...t, status: 'cancelled', updatedAt: Date.now() } : t))
+  }, [clearBuffTimer])
+
+  const deleteBuffTask = useCallback((taskId) => {
+    clearBuffTimer(taskId)
+    setBuffSchedules(prev => prev.filter(t => t.id !== taskId))
+  }, [clearBuffTimer])
+
+  const addBuffFavWorker = useCallback((id) => {
+    setBuffFavWorkers(prev => {
+      const next = prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+      saveBuffFavouriteWorkers(next)
+      return next
+    })
+  }, [])
+
+  const handleBuffMe = useCallback((id) => {
+    buffMeTarget.current = id
+    navigate('/buff')
+  }, [navigate])
+
+  const buffNoti = buffRunning && buffProgress ? (
+    <div className="fixed bottom-4 right-4 z-50 px-4 py-2.5 rounded-xl border border-amber-500/40 bg-amber-500/10 backdrop-blur-sm shadow-lg flex items-center gap-2 text-xs text-amber-300">
+      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+      <span>Buff đang chạy: {buffProgress.done}/{buffProgress.total} workers</span>
+    </div>
+  ) : null
 
   if (path === '/interact') {
-    return <InteractView accounts={accounts} settings={settings} navigate={navigate} dark={dark} toggleTheme={toggleTheme} />
+    return <>{buffNoti}<InteractView accounts={accounts} settings={settings} navigate={navigate} dark={dark} toggleTheme={toggleTheme} /></>
+  }
+
+  if (path === '/buff') {
+    return <>{buffNoti}<BuffView accounts={accounts} settings={settings} navigate={navigate} dark={dark} toggleTheme={toggleTheme} initialBossId={buffMeTarget.current} buffFavWorkers={buffFavWorkers} setBuffFavWorkers={setBuffFavWorkers} buffSchedules={buffSchedules} buffLogs={buffLogs} buffRunning={buffRunning} createBuffTask={createBuffTask} cancelBuffTask={cancelBuffTask} deleteBuffTask={deleteBuffTask} /></>
   }
 
   const m = path.match(/^\/([^/]+)(?:\/post\/([^/]+))?\/?$/)
@@ -140,15 +347,15 @@ export default function Root() {
     const accountRaw = accounts.find(a => a.id === userId)
     const account = accountRaw ? normalizeAccountStatus(accountRaw) : null
     if (account) {
-      return postId
+      return <>{buffNoti}{postId
         ? <PostDetailView account={account} postId={postId} settings={settings} navigate={navigate} />
-        : <ProfileView account={account} settings={settings} navigate={navigate} followersBaseline={followersBaseline} setFollowersBaseline={setFollowersBaseline} />
+        : <ProfileView account={account} settings={settings} navigate={navigate} followersBaseline={followersBaseline} setFollowersBaseline={setFollowersBaseline} />}</>
     }
   }
-  return <App path={path} navigate={navigate} dark={dark} toggleTheme={toggleTheme} followersBaseline={followersBaseline} setFollowersBaseline={setFollowersBaseline} />
+  return <>{buffNoti}<App path={path} navigate={navigate} dark={dark} toggleTheme={toggleTheme} followersBaseline={followersBaseline} setFollowersBaseline={setFollowersBaseline} addBuffFavWorker={addBuffFavWorker} handleBuffMe={handleBuffMe} buffFavWorkers={buffFavWorkers} /></>
 }
 
-function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFollowersBaseline }) {
+function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFollowersBaseline, addBuffFavWorker, handleBuffMe, buffFavWorkers = [] }) {
   const [accounts, setAccounts] = useState(() => loadAccounts())
   const [settings, setSettings] = useState(() => loadSettings())
   const [showSettings, setShowSettings] = useState(false)
@@ -1416,6 +1623,12 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
               <Search className="w-4 h-4" /> Tương tác
             </button>
             <button
+              onClick={() => navigate('/buff')}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
+            >
+              <TrendingUp className="w-4 h-4" /> Buff
+            </button>
+            <button
               onClick={() => setShowSettings(v => !v)}
               className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
             >
@@ -2090,6 +2303,9 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                   onRefresh={refreshOne}
                   onRemove={remove}
                   onOpen={(id) => navigate('/' + id)}
+                  onAddFavWorker={addBuffFavWorker}
+                  onBuffMe={handleBuffMe}
+                  buffFavWorkers={buffFavWorkers}
                   duplicateCaptions={getDuplicateCaptions(a.id)}
                   fetchTick={postsFetchTick}
                   followersBaseline={followersBaseline}
@@ -2819,7 +3035,7 @@ function formatNum(n) {
   return String(n)
 }
 
-function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, onRemove, onOpen, duplicateCaptions = [], fetchTick = 0, followersBaseline = {}, setFollowersBaseline, onCacheChange }) {
+function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, onRemove, onOpen, onAddFavWorker, onBuffMe, buffFavWorkers = [], duplicateCaptions = [], fetchTick = 0, followersBaseline = {}, setFollowersBaseline, onCacheChange }) {
   const a = account
   const loading = a.status === 'loading'
   const isErr = a.status === 'error' || a.status === 'locked' || a.status === 'blocked'
@@ -2957,6 +3173,11 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
             <button onClick={() => onOpen(a.id)} className="font-medium truncate hover:text-indigo-400 transition text-left">
               @{a.username || '—'}
             </button>
+            {buffFavWorkers.includes(a.id) ? (
+              <button onClick={() => onAddFavWorker?.(a.id)} className="text-amber-400 hover:text-amber-300" title="Favourite worker (click để bỏ)">
+                <User className="w-3.5 h-3.5" />
+              </button>
+            ) : null}
             {isErr
               ? <span className="text-xs text-rose-400 inline-flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> lỗi</span>
               : <span className="text-xs text-emerald-400 inline-flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> ok</span>}
@@ -3089,6 +3310,9 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
             <button disabled={fetchingPosts} onClick={() => runMenuAction(handleFetchPosts)} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50">Lấy posts</button>
             <div className="my-1 h-px bg-neutral-200 dark:bg-neutral-700" />
             <button onClick={() => runMenuAction(() => onRemove(a.id))} className="w-full text-left px-3 py-1.5 rounded-lg text-xs text-rose-500 hover:bg-rose-500/10">Xóa tài khoản</button>
+            <div className="my-1 h-px bg-neutral-200 dark:bg-neutral-700" />
+            <button onClick={() => runMenuAction(() => onAddFavWorker?.(a.id))} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800">Add to favourite workers</button>
+            <button onClick={() => runMenuAction(() => onBuffMe?.(a.id))} className="w-full text-left px-3 py-1.5 rounded-lg text-xs text-amber-400 hover:bg-amber-500/10">Buff me</button>
           </div>
         </div>
       )}
@@ -3551,10 +3775,13 @@ function PostDetailView({ account, postId, settings, navigate }) {
               {post.media_type} · {post.timestamp ? new Date(post.timestamp).toLocaleString() : ''}
             </div>
             {post.permalink && (
-              <a href={post.permalink} target="_blank" rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300">
-                <ExternalLink className="w-3 h-3" /> Mở trên Threads
-              </a>
+              <div className="flex items-center gap-1">
+                <a href={post.permalink} target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300">
+                  <ExternalLink className="w-3 h-3" /> Mở trên Threads
+                </a>
+                <CopyBtn text={post.permalink} label="Link" />
+              </div>
             )}
           </div>
 
@@ -3972,5 +4199,383 @@ function SearchResultCard({ post }) {
         </div>
       </div>
     </div>
+  )
+}
+
+const MAX_BUFF_LOGS = 200
+const MAX_BUFF_FAILURE_DETAILS = 12
+const BUFF_FAILURE_PREVIEW = 3
+
+function BuffView({ accounts, settings, navigate, dark, toggleTheme, initialBossId = null, buffFavWorkers = [], setBuffFavWorkers, buffSchedules, buffLogs, buffRunning, createBuffTask, cancelBuffTask, deleteBuffTask }) {
+  const [expandedBuffFailures, setExpandedBuffFailures] = useState(() => new Set())
+
+  const [bossId, setBossId] = useState(initialBossId || '')
+  const [bossSearch, setBossSearch] = useState('')
+  const [bossPosts, setBossPosts] = useState([])
+  const [loadingPosts, setLoadingPosts] = useState(false)
+
+  const [postMode, setPostMode] = useState('random')
+  const [selectedPostIds, setSelectedPostIds] = useState(new Set())
+
+  const [workerIds, setWorkerIds] = useState(new Set())
+  const [workerSearch, setWorkerSearch] = useState('')
+  const [workerSource, setWorkerSource] = useState('all')
+
+  const [buffMode, setBuffMode] = useState('once')
+  const [buffEveryValue, setBuffEveryValue] = useState(10)
+  const [buffRepeatUnit, setBuffRepeatUnit] = useState('minute')
+  const [delayMin, setDelayMin] = useState(3)
+  const [delayMax, setDelayMax] = useState(8)
+
+  const [buffMsg, setBuffMsg] = useState('')
+
+  const boss = accounts.find(a => a.id === bossId)
+  const availableWorkers = useMemo(() => {
+    const normalAccounts = accounts.filter(a => a.id !== bossId && a.status === 'ok' && !isAccountLocked(a) && !isTokenDead(a) && !isTokenBlocked(a))
+    return normalAccounts.filter(a => {
+      const posts = cacheGet(`posts:${a.id}:10`, (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000)
+      const isDuplicate = posts && posts.length > 0 && new Set(posts.map(p => (p.text || '').trim())).size < posts.length
+      const noPostOver24h = posts && posts.length > 0 && (Date.now() - new Date(posts[0].timestamp).getTime() > 24 * 60 * 60 * 1000)
+      return !isDuplicate && !noPostOver24h
+    })
+  }, [accounts, bossId, settings])
+
+  const filteredBossOptions = useMemo(() => {
+    const okAccounts = accounts.filter(a => a.status === 'ok')
+    if (!bossSearch.trim()) return okAccounts
+    const q = bossSearch.trim().toLowerCase()
+    return okAccounts.filter(a => (a.username || '').toLowerCase().includes(q) || (a.name || '').toLowerCase().includes(q))
+  }, [accounts, bossSearch])
+
+  const filteredWorkers = useMemo(() => {
+    let list = workerSource === 'favourite'
+      ? availableWorkers.filter(a => buffFavWorkers.includes(a.id))
+      : availableWorkers
+    if (workerSearch.trim()) {
+      const q = workerSearch.trim().toLowerCase()
+      list = list.filter(a => (a.username || '').toLowerCase().includes(q) || (a.name || '').toLowerCase().includes(q))
+    }
+    return list
+  }, [availableWorkers, workerSearch, workerSource, buffFavWorkers])
+
+  useEffect(() => {
+    if (!bossId) { setBossPosts([]); return }
+    const bossAcc = accounts.find(a => a.id === bossId)
+    if (!bossAcc) return
+    let cancelled = false
+    setLoadingPosts(true)
+    fetchPosts(bossId, bossAcc.token, { settings, limit: 10, skipCache: true })
+      .then(posts => { if (!cancelled) setBossPosts(posts || []) })
+      .catch(() => { if (!cancelled) setBossPosts([]) })
+      .finally(() => { if (!cancelled) setLoadingPosts(false) })
+    return () => { cancelled = true }
+  }, [bossId])
+
+  const toggleWorker = (id) => setWorkerIds(prev => {
+    const next = new Set(prev)
+    next.has(id) ? next.delete(id) : next.add(id)
+    return next
+  })
+  const selectAllWorkers = () => setWorkerIds(new Set(filteredWorkers.map(a => a.id)))
+  const selectNoWorkers = () => setWorkerIds(new Set())
+
+  const addFavWorker = (id) => {
+    if (buffFavWorkers.includes(id)) return
+    const next = [...buffFavWorkers, id]
+    setBuffFavWorkers(next)
+    saveBuffFavouriteWorkers(next)
+  }
+  const removeFavWorker = (id) => {
+    const next = buffFavWorkers.filter(x => x !== id)
+    setBuffFavWorkers(next)
+    saveBuffFavouriteWorkers(next)
+  }
+
+  const togglePostSelect = (id) => setSelectedPostIds(prev => {
+    const next = new Set(prev)
+    next.has(id) ? next.delete(id) : next.add(id)
+    return next
+  })
+
+  const handleCreateBuffTask = () => {
+    if (!bossId) { setBuffMsg('Chọn tài khoản boss'); return }
+    if (workerIds.size === 0) { setBuffMsg('Chọn ít nhất 1 worker'); return }
+    if (postMode === 'selected' && selectedPostIds.size === 0) { setBuffMsg('Chọn ít nhất 1 post'); return }
+
+    const unitMs = { minute: 60000, hour: 3600000, day: 86400000 }
+    const intervalMs = (Number(buffEveryValue) || 10) * (unitMs[buffRepeatUnit] || 60000)
+
+    const task = {
+      id: `buff_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      mode: buffMode,
+      bossAccountId: bossId,
+      postMode,
+      selectedPostIds: postMode === 'selected' ? [...selectedPostIds] : [],
+      workerIds: [...workerIds],
+      delayMin: Math.max(1, Number(delayMin) || 3),
+      delayMax: Math.max(Number(delayMin) || 3, Number(delayMax) || 8),
+      everyValue: Number(buffEveryValue) || 10,
+      repeatUnit: buffRepeatUnit,
+      intervalMs,
+      nextRunAt: buffMode === 'once' ? Date.now() : Date.now() + intervalMs,
+      runCount: 0,
+      lastRunAt: null,
+      lastResult: null,
+    }
+
+    createBuffTask(task)
+    setBuffMsg('Đã tạo buff task')
+  }
+
+  const toggleBuffFailureExpand = (logId) => {
+    setExpandedBuffFailures(prev => {
+      const next = new Set(prev)
+      next.has(logId) ? next.delete(logId) : next.add(logId)
+      return next
+    })
+  }
+
+  return (
+    <PageShell navigate={navigate} title="Buff Account" subtitle="Repost hàng loạt" backTo="/">
+      <div className="space-y-4">
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 space-y-4">
+          <h3 className="text-sm font-medium text-amber-300">Cấu hình Buff</h3>
+
+          <div className="grid md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <label className="text-xs text-neutral-400">Tài khoản Boss</label>
+              <input
+                value={bossSearch}
+                onChange={(e) => setBossSearch(e.target.value)}
+                placeholder="Tìm username boss..."
+                className="w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+              />
+              <select
+                value={bossId}
+                onChange={(e) => { setBossId(e.target.value); setSelectedPostIds(new Set()); setWorkerIds(new Set()) }}
+                className="w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+              >
+                <option value="">-- Chọn boss --</option>
+                {filteredBossOptions.map(a => (
+                  <option key={a.id} value={a.id}>@{a.username || a.id}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs text-neutral-400">Chế độ chọn post</label>
+              <select
+                value={postMode}
+                onChange={(e) => setPostMode(e.target.value)}
+                className="w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+              >
+                <option value="random">Random (1 trong 10 bài gần nhất)</option>
+                <option value="selected">Chỉ định post</option>
+              </select>
+            </div>
+          </div>
+
+          {bossId && postMode === 'selected' && (
+            <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-3 space-y-2">
+              <div className="text-xs text-neutral-400">Chọn post để repost ({selectedPostIds.size} đã chọn)</div>
+              {loadingPosts ? (
+                <div className="text-xs text-neutral-500 flex items-center gap-1"><RefreshCw className="w-3 h-3 animate-spin" /> Đang tải posts...</div>
+              ) : bossPosts.length === 0 ? (
+                <div className="text-xs text-neutral-500">Không có post nào</div>
+              ) : (
+                <div className="max-h-48 overflow-y-auto space-y-1">
+                  {bossPosts.map(p => (
+                    <label key={p.id} className="flex items-start gap-2 text-xs px-2 py-1.5 rounded hover:bg-neutral-200/60 dark:hover:bg-neutral-900 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selectedPostIds.has(p.id)}
+                        onChange={() => togglePostSelect(p.id)}
+                        className="w-3.5 h-3.5 mt-0.5"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="truncate text-neutral-300">{p.text || '(media only)'}</div>
+                        <div className="text-[10px] text-neutral-500">{new Date(p.timestamp).toLocaleString()} · {p.media_type}</div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {bossId && (
+            <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-neutral-400">Workers ({workerIds.size}/{filteredWorkers.length})</div>
+                <div className="flex items-center gap-2">
+                  <select value={workerSource} onChange={(e) => setWorkerSource(e.target.value)} className="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-800 text-xs bg-neutral-100 dark:bg-neutral-900 outline-none">
+                    <option value="all">Tất cả</option>
+                    <option value="favourite">Favourite ({buffFavWorkers.length})</option>
+                  </select>
+                  <button onClick={selectAllWorkers} className="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-800 text-xs hover:bg-neutral-200 dark:hover:bg-neutral-900">Chọn tất cả</button>
+                  <button onClick={selectNoWorkers} className="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-800 text-xs hover:bg-neutral-200 dark:hover:bg-neutral-900">Bỏ chọn</button>
+                </div>
+              </div>
+              <input
+                value={workerSearch}
+                onChange={(e) => setWorkerSearch(e.target.value)}
+                placeholder="Tìm worker username..."
+                className="w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+              />
+              {filteredWorkers.length === 0 ? (
+                <div className="text-xs text-neutral-500">Không có worker khả dụng</div>
+              ) : (
+                <div className="max-h-40 overflow-y-auto space-y-1">
+                  {filteredWorkers.map(a => (
+                    <label key={a.id} className="flex items-center gap-2 text-xs px-2 py-1.5 rounded hover:bg-neutral-200/60 dark:hover:bg-neutral-900 cursor-pointer">
+                      <input type="checkbox" checked={workerIds.has(a.id)} onChange={() => toggleWorker(a.id)} className="w-3.5 h-3.5" />
+                      <span className="truncate flex-1">@{a.username || a.id}</span>
+                      {buffFavWorkers.includes(a.id) ? (
+                        <button onClick={(e) => { e.preventDefault(); removeFavWorker(a.id) }} className="text-[10px] text-amber-400 hover:text-amber-300" title="Bỏ favourite">★</button>
+                      ) : (
+                        <button onClick={(e) => { e.preventDefault(); addFavWorker(a.id) }} className="text-[10px] text-neutral-500 hover:text-amber-400" title="Thêm favourite">☆</button>
+                      )}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="grid md:grid-cols-4 gap-2">
+            <label className="text-xs text-neutral-400">
+              Chế độ
+              <select value={buffMode} onChange={(e) => setBuffMode(e.target.value)} className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none">
+                <option value="once">Chạy 1 lần</option>
+                <option value="repeat">Lặp chu kỳ</option>
+              </select>
+            </label>
+            {buffMode === 'repeat' && (
+              <>
+                <label className="text-xs text-neutral-400">
+                  Chu kỳ
+                  <input type="number" min="1" value={buffEveryValue} onChange={(e) => setBuffEveryValue(e.target.value)} className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none" />
+                </label>
+                <label className="text-xs text-neutral-400">
+                  Đơn vị
+                  <select value={buffRepeatUnit} onChange={(e) => setBuffRepeatUnit(e.target.value)} className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none">
+                    <option value="minute">Phút</option>
+                    <option value="hour">Giờ</option>
+                    <option value="day">Ngày</option>
+                  </select>
+                </label>
+              </>
+            )}
+            <label className="text-xs text-neutral-400">
+              Delay min (s)
+              <input type="number" min="1" value={delayMin} onChange={(e) => setDelayMin(e.target.value)} className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none" />
+            </label>
+            <label className="text-xs text-neutral-400">
+              Delay max (s)
+              <input type="number" min="1" value={delayMax} onChange={(e) => setDelayMax(e.target.value)} className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none" />
+            </label>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={handleCreateBuffTask}
+              disabled={buffRunning}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-medium text-neutral-900 disabled:opacity-60"
+            >
+              <TrendingUp className="w-3.5 h-3.5" /> Bắt đầu buff
+            </button>
+            {buffMsg && <span className="text-xs text-neutral-300">{buffMsg}</span>}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900/50 p-4 space-y-2">
+          <div className="text-xs text-neutral-400">Danh sách buff tasks</div>
+          {buffSchedules.length === 0 ? (
+            <div className="text-xs text-neutral-500">Chưa có buff task nào</div>
+          ) : (
+            <div className="space-y-2 max-h-52 overflow-y-auto">
+              {buffSchedules.map(task => {
+                const bossAcc = accounts.find(a => a.id === task.bossAccountId)
+                return (
+                  <div key={task.id} className="rounded-lg border border-neutral-200 dark:border-neutral-800 px-3 py-2 text-xs text-neutral-300">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="truncate">
+                        <span className="font-medium">Boss: @{bossAcc?.username || task.bossAccountId}</span>
+                        {' · '}{task.mode === 'once' ? '1 lần' : `Lặp ${task.everyValue} ${task.repeatUnit === 'day' ? 'ngày' : task.repeatUnit === 'hour' ? 'giờ' : 'phút'}`}
+                        {' · '}{task.workerIds?.length || 0} workers
+                        {' · '}post: {task.postMode === 'random' ? 'random' : `${task.selectedPostIds?.length || 0} chỉ định`}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {(task.status === 'active' || task.status === 'running') && (
+                          <button onClick={() => cancelBuffTask(task.id)} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-rose-800 text-rose-400 hover:bg-rose-500/10">
+                            <X className="w-3 h-3" /> Hủy
+                          </button>
+                        )}
+                        {(task.status === 'completed' || task.status === 'cancelled') && (
+                          <button onClick={() => deleteBuffTask(task.id)} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-rose-800 text-rose-400 hover:bg-rose-500/10">
+                            <Trash2 className="w-3 h-3" /> Xóa
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-neutral-400">
+                      <span>Trạng thái: <strong>{task.status}</strong></span>
+                      {task.nextRunAt && <span>Kế tiếp: {new Date(task.nextRunAt).toLocaleString()}</span>}
+                    </div>
+                    {task.lastResult && (
+                      <div className="mt-1 text-[11px] text-neutral-400">
+                        Run gần nhất: ok {task.lastResult.ok} / fail {task.lastResult.fail} · {task.lastResult.durationSec}s · post: {task.lastResult.postId || '—'}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900/50 p-4 space-y-2">
+          <div className="text-xs text-neutral-400">Buff Logs</div>
+          {buffLogs.length === 0 ? (
+            <div className="text-xs text-neutral-500">Chưa có log</div>
+          ) : (
+            <div className="space-y-1 max-h-52 overflow-y-auto">
+              {buffLogs.map(l => (
+                <div key={l.id} className="text-xs font-mono text-neutral-300 rounded px-2 py-1 border border-neutral-800/70">
+                  <div className="flex items-center justify-between gap-2">
+                    <span>{new Date(l.at).toLocaleString()} · {l.taskId}</span>
+                    <span className={l.fail > 0 ? 'text-amber-300' : 'text-emerald-300'}>ok {l.success} / fail {l.fail} · {l.durationSec}s</span>
+                  </div>
+                  {l.postId && <div className="text-neutral-500 mt-0.5 flex items-center gap-1">Post: {l.permalink ? <><a href={l.permalink} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">{l.postId}</a><CopyBtn text={l.permalink} label="Link" /></> : l.postId}</div>}
+                  {l.message && <div className="text-rose-300 mt-0.5">{l.message}</div>}
+                  {Array.isArray(l.failures) && l.failures.length > 0 && (
+                    <div className="mt-1 pl-2 border-l border-rose-500/30 space-y-0.5 text-[11px]">
+                      {(expandedBuffFailures.has(l.id) ? l.failures : l.failures.slice(0, BUFF_FAILURE_PREVIEW)).map((f, idx) => (
+                        <div key={`${l.id}_bf_${idx}`} className="text-rose-300 break-all">
+                          • {f.username ? `@${f.username}` : f.accountId}{f.token ? ` · ${f.token}` : ''} · {f.error}
+                        </div>
+                      ))}
+                      {(l.failHidden > 0 || l.failures.length > BUFF_FAILURE_PREVIEW) && (
+                        <button
+                          onClick={() => toggleBuffFailureExpand(l.id)}
+                          className="text-indigo-300 hover:text-indigo-200 underline"
+                        >
+                          {expandedBuffFailures.has(l.id)
+                            ? 'Thu gọn lỗi'
+                            : `+ ${Math.max(l.failHidden || 0, l.failures.length - BUFF_FAILURE_PREVIEW)} lỗi khác... (click để xem tất cả)`}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </PageShell>
   )
 }
