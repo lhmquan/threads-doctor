@@ -1,5 +1,17 @@
 # Changelog — Threads Doctor
 
+## v0.13.1 — 2026-05-12
+
+### Buff mode update (Quote default)
+- Đổi chế độ Buff mặc định sang `Quote`
+- Loại bỏ hướng link attachment cũ, chuyển mode thứ hai sang `Quote post` (create + publish)
+- Bổ sung fallback text mặc định khi tạo quote (`🔁`) để tránh lỗi `The parameter text is required`
+- UI chọn mode Buff đổi sang radio-style `Repost` / `Quote` (không dùng dropdown)
+
+### Logging improvements
+- Bổ sung app logs cho thao tác ở trang chi tiết tài khoản/chi tiết post (fetch posts/insights, refresh replies, gửi reply)
+- Bổ sung app logs cho luồng buff background (start/finish/cancel)
+
 ## v0.13.0 — 2026-05-10
 
 ### Buff Account (Boss/Worker)

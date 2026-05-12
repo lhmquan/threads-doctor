@@ -324,6 +324,40 @@ export async function repostPost(postId, token, { settings }) {
   return data
 }
 
+export async function createQuotePost(userId, token, { settings, text = '', quotePostId }) {
+  if (!quotePostId) throw new Error('Thiếu quote_post_id để tạo quote post')
+  const safeText = String(text || '').trim() || '🔁'
+  const createUrl = buildGraphUrl(`/${userId}/threads`, {
+    media_type: 'TEXT',
+    text: safeText,
+    quote_post_id: quotePostId,
+    access_token: token,
+  })
+  const createRes = await callWebhook({
+    webhookUrl: getWebhookUrl(settings),
+    apiKey: settings?.apiKey,
+    payload: { action: 'createQuotePost', method: 'POST', url: createUrl },
+  })
+  const creationId = createRes?.id
+  if (!creationId) throw new Error('Không tạo được quote-post container')
+  return { creationId }
+}
+
+export async function publishThreadsPost(userId, token, { settings, creationId }) {
+  if (!creationId) throw new Error('Thiếu creation_id để publish')
+  const publishUrl = buildGraphUrl(`/${userId}/threads_publish`, {
+    creation_id: creationId,
+    access_token: token,
+  })
+  const pubRes = await callWebhook({
+    webhookUrl: getWebhookUrl(settings),
+    apiKey: settings?.apiKey,
+    payload: { action: 'publishThreadsPost', method: 'POST', url: publishUrl },
+  })
+  if (!pubRes?.id) throw new Error('Publish thất bại — không nhận được media ID')
+  return pubRes
+}
+
 export async function searchKeyword(token, { settings, q, searchType, searchMode, mediaType, authorUsername, since, until, limit, skipCache = false } = {}) {
   const keyParts = [q, searchType, searchMode, mediaType, authorUsername, since, until, limit].filter(Boolean).join(':')
   const key = `search:${keyParts}`
