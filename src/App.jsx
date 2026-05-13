@@ -8,9 +8,9 @@ import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetch
 import { generateReply } from './lib/ai.js'
 import { parseThreadsUrl } from './lib/threads-url.js'
 import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline, loadSchedules, saveSchedules, loadScheduleLogs, saveScheduleLogs, loadAppLogs, saveAppLogs, loadBuffSchedules, saveBuffSchedules, loadBuffLogs, saveBuffLogs, loadBuffFavouriteWorkers, saveBuffFavouriteWorkers } from './lib/storage.js'
-import { cacheClear, cacheGet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
+import { cacheClear, cacheGet, cacheSet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
-const APP_VERSION = '0.13.1'
+const APP_VERSION = '0.13.2'
 const MAX_SCHEDULE_LOGS = 200
 const MAX_APP_LOGS = 1500
 const MAX_SCHEDULE_FAILURE_DETAILS = 12
@@ -2013,7 +2013,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                           <span>{new Date(l.at).toLocaleString()} · {l.source} · {l.action}</span>
                           <span className={l.level === 'error' ? 'text-rose-400' : l.level === 'warn' ? 'text-amber-300' : 'text-emerald-300'}>{l.level}</span>
                         </div>
-                        <div className="text-neutral-300 mt-0.5">{l.message}</div>
+                        <div className="text-neutral-300 mt-0.5">{l.message?.startsWith('[API]') ? <><span className="text-sky-400 font-medium">[API]</span>{l.message.slice(5)}</> : l.message?.startsWith('[Cache]') ? <><span className="text-lime-400 font-medium">[Cache]</span>{l.message.slice(7)}</> : l.message}</div>
                         {l.source === 'scheduler' && l.action === 'run' && Array.isArray(l.meta?.failures) && l.meta.failures.length > 0 ? (
                           <div className="mt-1 pl-2 border-l border-rose-500/30 space-y-0.5 text-[11px]">
                             {summarizeScheduleFailures(l.meta.failures).length > 0 && (
@@ -3128,16 +3128,16 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
   const handleGetInsights = async () => {
     setFetchingInsights(true)
     try {
-      onActionLog?.({ level: 'info', source: 'account', action: 'card_fetch_insights_start', message: `Bắt đầu lấy insights cho @${a.username || a.id}`, meta: { id: a.id } })
+      onActionLog?.({ level: 'info', source: 'account', action: 'card_fetch_insights_start', message: `[API] Bắt đầu lấy insights cho @${a.username || a.id}`, meta: { id: a.id } })
       const data = await fetchInsights(a.id, a.token, { settings, skipCache: true })
       setInsights(data)
       if (data?.followers_count != null && setFollowersBaseline) {
         setFollowersBaseline(prev => ({ ...prev, [a.id]: { count: data.followers_count, timestamp: Date.now() } }))
       }
-      onActionLog?.({ level: 'info', source: 'account', action: 'card_fetch_insights_ok', message: `Lấy insights thành công cho @${a.username || a.id}`, meta: { id: a.id } })
+      onActionLog?.({ level: 'info', source: 'account', action: 'card_fetch_insights_ok', message: `[API] Lấy insights thành công cho @${a.username || a.id}`, meta: { id: a.id } })
     } catch (err) {
       setInsights(null)
-      onActionLog?.({ level: 'warn', source: 'account', action: 'card_fetch_insights_fail', message: err?.message || `Lấy insights thất bại cho @${a.username || a.id}`, meta: { id: a.id } })
+      onActionLog?.({ level: 'warn', source: 'account', action: 'card_fetch_insights_fail', message: `[API] ${err?.message || `Lấy insights thất bại cho @${a.username || a.id}`}`, meta: { id: a.id } })
     } finally { setFetchingInsights(false); onCacheChange?.() }
   }
 
@@ -3155,12 +3155,12 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
   const handleFetchPosts = async () => {
     setFetchingPosts(true)
     try {
-      onActionLog?.({ level: 'info', source: 'account', action: 'card_fetch_posts_start', message: `Bắt đầu lấy posts cho @${a.username || a.id}`, meta: { id: a.id } })
+      onActionLog?.({ level: 'info', source: 'account', action: 'card_fetch_posts_start', message: `[API] Bắt đầu lấy posts cho @${a.username || a.id}`, meta: { id: a.id } })
       const posts = await fetchPosts(a.id, a.token, { settings, limit: 10, skipCache: true })
       setLastPostTime(posts.length > 0 ? posts[0].timestamp : null)
-      onActionLog?.({ level: 'info', source: 'account', action: 'card_fetch_posts_ok', message: `Lấy posts thành công cho @${a.username || a.id}`, meta: { id: a.id, count: posts.length } })
+      onActionLog?.({ level: 'info', source: 'account', action: 'card_fetch_posts_ok', message: `[API] Lấy posts thành công cho @${a.username || a.id}`, meta: { id: a.id, count: posts.length } })
     } catch (err) {
-      onActionLog?.({ level: 'warn', source: 'account', action: 'card_fetch_posts_fail', message: err?.message || `Lấy posts thất bại cho @${a.username || a.id}`, meta: { id: a.id } })
+      onActionLog?.({ level: 'warn', source: 'account', action: 'card_fetch_posts_fail', message: `[API] ${err?.message || `Lấy posts thất bại cho @${a.username || a.id}`}`, meta: { id: a.id } })
     }
     finally { setFetchingPosts(false); onCacheChange?.() }
   }
@@ -3299,7 +3299,7 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
             {a.username && <CopyBtn text={a.username} label="Username" />}
             {a.username && (
               <a
-                href={`https://www.threads.net/@${a.username}`}
+                href={`https://www.threads.com/@${a.username}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] text-neutral-400 dark:text-neutral-400 hover:text-indigo-400 hover:bg-indigo-500/10 transition"
@@ -3378,6 +3378,7 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
             onClick={(e) => e.stopPropagation()}
           >
             <button onClick={() => runMenuAction(() => onOpen(a.id))} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800">Mở chi tiết</button>
+            <button disabled={!a.username} onClick={() => runMenuAction(async () => { await navigator.clipboard.writeText(`https://www.threads.com/@${a.username}`) })} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50">Copy URL profile</button>
             <button onClick={() => runMenuAction(() => onToggleSelect())} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800">{selected ? 'Bỏ chọn' : 'Chọn tài khoản'}</button>
             <button disabled={loading} onClick={() => runMenuAction(() => onRefresh(a.id))} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50">Refresh token</button>
             <button disabled={fetchingInsights} onClick={() => runMenuAction(handleGetInsights)} className="w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50">Lấy insights</button>
@@ -3425,38 +3426,42 @@ function ProfileView({ account, settings, navigate, followersBaseline = {}, setF
 
   const handleFetchInsights = async () => {
     setFetchingInsights(true)
-    onActionLog?.({ level: 'info', source: 'profile', action: 'fetch_insights_start', message: `Bắt đầu lấy insights profile @${account.username}`, meta: { id: account.id } })
+    onActionLog?.({ level: 'info', source: 'profile', action: 'fetch_insights_start', message: `[API] Bắt đầu lấy insights profile @${account.username}`, meta: { id: account.id } })
     try {
       const data = await fetchInsights(account.id, account.token, { settings, skipCache: true })
       setInsights(data)
       if (data?.followers_count != null && setFollowersBaseline) {
         setFollowersBaseline(prev => ({ ...prev, [account.id]: { count: data.followers_count, timestamp: Date.now() } }))
       }
-      onActionLog?.({ level: 'info', source: 'profile', action: 'fetch_insights_ok', message: `Lấy insights profile thành công @${account.username}`, meta: { id: account.id } })
+      onActionLog?.({ level: 'info', source: 'profile', action: 'fetch_insights_ok', message: `[API] Lấy insights profile thành công @${account.username}`, meta: { id: account.id } })
     } catch (err) {
-      onActionLog?.({ level: 'warn', source: 'profile', action: 'fetch_insights_fail', message: err?.message || `Lấy insights profile thất bại @${account.username}`, meta: { id: account.id } })
+      onActionLog?.({ level: 'warn', source: 'profile', action: 'fetch_insights_fail', message: `[API] ${err?.message || `Lấy insights profile thất bại @${account.username}`}`, meta: { id: account.id } })
     }
     finally { setFetchingInsights(false) }
   }
 
   useEffect(() => {
-    let alive = true
-    setLoading(true); setError('')
-    fetchPosts(account.id, account.token, { settings, limit: 10 })
-      .then(list => { if (alive) setPosts(list) })
-      .catch(err => { if (alive) setError(err.message) })
-      .finally(() => { if (alive) setLoading(false) })
-    fetchInsights(account.id, account.token, { settings })
-      .then(data => {
-        if (alive) {
-          setInsights(data)
-          if (data?.followers_count != null && setFollowersBaseline) {
-            setFollowersBaseline(prev => ({ ...prev, [account.id]: { count: data.followers_count, timestamp: Date.now() } }))
-          }
-        }
-      })
-      .catch(() => {})
-    return () => { alive = false }
+    const postsTtl = (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000
+    const insightsTtl = (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000
+
+    const cachedPosts = cacheGet(`posts:${account.id}:10`, postsTtl)
+    if (Array.isArray(cachedPosts)) {
+      setPosts(cachedPosts)
+      setLoading(false)
+      onActionLog?.({ level: 'info', source: 'profile', action: 'load_posts_cache', message: `[Cache] Đọc posts từ cache @${account.username}`, meta: { id: account.id, count: cachedPosts.length } })
+    } else {
+      setPosts([])
+      setLoading(false)
+    }
+
+    const cachedInsights = cacheGet(`insights:${account.id}`, insightsTtl)
+    if (cachedInsights) {
+      setInsights(cachedInsights)
+      if (cachedInsights.followers_count != null && setFollowersBaseline) {
+        setFollowersBaseline(prev => ({ ...prev, [account.id]: { count: cachedInsights.followers_count, timestamp: Date.now() } }))
+      }
+      onActionLog?.({ level: 'info', source: 'profile', action: 'load_insights_cache', message: `[Cache] Đọc insights từ cache @${account.username}`, meta: { id: account.id } })
+    }
   }, [account.id])
 
   const [fetchingPosts, setFetchingPosts] = useState(false)
@@ -3464,14 +3469,14 @@ function ProfileView({ account, settings, navigate, followersBaseline = {}, setF
   const handleFetchPosts = async () => {
     setFetchingPosts(true)
     setError('')
-    onActionLog?.({ level: 'info', source: 'profile', action: 'fetch_posts_start', message: `Bắt đầu lấy posts profile @${account.username}`, meta: { id: account.id } })
+    onActionLog?.({ level: 'info', source: 'profile', action: 'fetch_posts_start', message: `[API] Bắt đầu lấy posts profile @${account.username}`, meta: { id: account.id } })
     try {
       const list = await fetchPosts(account.id, account.token, { settings, limit: 10, skipCache: true })
       setPosts(list)
-      onActionLog?.({ level: 'info', source: 'profile', action: 'fetch_posts_ok', message: `Lấy posts profile thành công @${account.username}`, meta: { id: account.id, count: list.length } })
+      onActionLog?.({ level: 'info', source: 'profile', action: 'fetch_posts_ok', message: `[API] Lấy posts profile thành công @${account.username}`, meta: { id: account.id, count: list.length } })
     } catch (err) {
       setError(err.message)
-      onActionLog?.({ level: 'warn', source: 'profile', action: 'fetch_posts_fail', message: err?.message || `Lấy posts profile thất bại @${account.username}`, meta: { id: account.id } })
+      onActionLog?.({ level: 'warn', source: 'profile', action: 'fetch_posts_fail', message: `[API] ${err?.message || `Lấy posts profile thất bại @${account.username}`}`, meta: { id: account.id } })
     }
     finally { setFetchingPosts(false) }
   }
@@ -3483,7 +3488,7 @@ function ProfileView({ account, settings, navigate, followersBaseline = {}, setF
   const handleFetchAllPostInsights = async () => {
     if (posts.length === 0) return
     setFetchingAllPI(true)
-    onActionLog?.({ level: 'info', source: 'profile', action: 'fetch_all_post_insights_start', message: `Bắt đầu lấy insights all posts @${account.username}`, meta: { id: account.id, total: posts.length } })
+    onActionLog?.({ level: 'info', source: 'profile', action: 'fetch_all_post_insights_start', message: `[API] Bắt đầu lấy insights all posts @${account.username}`, meta: { id: account.id, total: posts.length } })
     setAllPIProgress({ done: 0, total: posts.length })
     const DELAY = (settings?.bulkDelay ?? 5) * 1000
     let fail = 0
@@ -3498,7 +3503,7 @@ function ProfileView({ account, settings, navigate, followersBaseline = {}, setF
     }
     setFetchingAllPI(false)
     setAllPITick(t => t + 1)
-    onActionLog?.({ level: fail > 0 ? 'warn' : 'info', source: 'profile', action: 'fetch_all_post_insights_finish', message: `Hoàn tất insights all posts @${account.username}: fail ${fail}/${posts.length}`, meta: { id: account.id, total: posts.length, fail } })
+    onActionLog?.({ level: fail > 0 ? 'warn' : 'info', source: 'profile', action: 'fetch_all_post_insights_finish', message: `[API] Hoàn tất insights all posts @${account.username}: fail ${fail}/${posts.length}`, meta: { id: account.id, total: posts.length, fail } })
   }
 
   const duplicateTexts = useMemo(() => {
@@ -3765,9 +3770,9 @@ function PostDetailView({ account, postId, settings, navigate, onActionLog }) {
   const [post, setPost] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [pi, setPi] = useState(() => cacheGet(`post_insights:${postId}`, (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000) || null)
+  const [pi, setPi] = useState(null)
   const [fetchingPI, setFetchingPI] = useState(false)
-  const [replies, setReplies] = useState(() => cacheGet(`replies:${postId}`, (settings?.cacheTTLReplies ?? 10) * 60 * 1000 || 10 * 60 * 1000) || [])
+  const [replies, setReplies] = useState([])
   const [loadingReplies, setLoadingReplies] = useState(false)
   const [nextCursor, setNextCursor] = useState(null)
   const [hasMore, setHasMore] = useState(false)
@@ -3799,7 +3804,7 @@ function PostDetailView({ account, postId, settings, navigate, onActionLog }) {
   const handleSendReply = async (replyToId) => {
     if (!replyText.trim()) return
     setSendingReply(true); setReplyStatus('')
-    onActionLog?.({ level: 'info', source: 'post_detail', action: 'send_reply_start', message: `Bắt đầu gửi reply cho post ${postId}`, meta: { accountId: account.id, postId, replyToId } })
+    onActionLog?.({ level: 'info', source: 'post_detail', action: 'send_reply_start', message: `[API] Bắt đầu gửi reply cho post ${postId}`, meta: { accountId: account.id, postId, replyToId } })
     try {
       await postReply(account.id, account.token, { settings, text: replyText.trim(), replyToId })
       setReplyStatus('Đã gửi reply! (đợi 30s để publish)')
@@ -3807,46 +3812,59 @@ function PostDetailView({ account, postId, settings, navigate, onActionLog }) {
       setReplyingTo(null)
       const { replies: fresh, nextCursor: cursor, hasMore: more } = await fetchRepliesPage(postId, account.token, { settings })
       setReplies(fresh); setNextCursor(cursor); setHasMore(more)
-      onActionLog?.({ level: 'info', source: 'post_detail', action: 'send_reply_ok', message: `Gửi reply thành công cho post ${postId}`, meta: { accountId: account.id, postId, replyToId } })
+      cacheSet(`replies:${postId}`, fresh)
+      onActionLog?.({ level: 'info', source: 'post_detail', action: 'send_reply_ok', message: `[API] Gửi reply thành công cho post ${postId}`, meta: { accountId: account.id, postId, replyToId } })
     } catch (err) {
       setReplyStatus('Lỗi: ' + err.message)
-      onActionLog?.({ level: 'warn', source: 'post_detail', action: 'send_reply_fail', message: err?.message || `Gửi reply thất bại cho post ${postId}`, meta: { accountId: account.id, postId, replyToId } })
+      onActionLog?.({ level: 'warn', source: 'post_detail', action: 'send_reply_fail', message: `[API] ${err?.message || `Gửi reply thất bại cho post ${postId}`}`, meta: { accountId: account.id, postId, replyToId } })
     } finally { setSendingReply(false) }
   }
 
   useEffect(() => {
     let alive = true
+    const repliesTtl = (settings?.cacheTTLReplies ?? 10) * 60 * 1000 || 10 * 60 * 1000
+    const insightsTtl = (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000
+    const postTtl = (settings?.cacheTTLPost ?? 30) * 60 * 1000 || 30 * 60 * 1000
+
     setLoading(true); setError('')
-    fetchPost(postId, account.token, { settings })
-      .then(p => { if (alive) setPost(p) })
-      .catch(err => { if (alive) setError(err.message) })
-      .finally(() => { if (alive) setLoading(false) })
-    if (!pi) {
-      fetchPostInsights(postId, account.token, { settings })
-        .then(data => { if (alive) setPi(data) })
-        .catch(() => {})
+    setReplies([]); setNextCursor(null); setHasMore(false); setPi(null)
+
+    const cachedPost = cacheGet(`post:${postId}`, postTtl)
+    if (cachedPost) {
+      setPost(cachedPost)
+      setLoading(false)
+      onActionLog?.({ level: 'info', source: 'post_detail', action: 'load_post_cache', message: `[Cache] Đọc post từ cache ${postId}`, meta: { accountId: account.id, postId } })
+    } else {
+      fetchPost(postId, account.token, { settings })
+        .then(p => { if (alive) setPost(p) })
+        .catch(err => { if (alive) setError(err.message) })
+        .finally(() => { if (alive) setLoading(false) })
     }
-    if (replies.length === 0) {
-      setLoadingReplies(true)
-      fetchRepliesPage(postId, account.token, { settings })
-        .then(({ replies: data, nextCursor: cursor, hasMore: more }) => {
-          if (alive) { setReplies(data); setNextCursor(cursor); setHasMore(more) }
-        })
-        .catch(() => {})
-        .finally(() => { if (alive) setLoadingReplies(false) })
+
+    const cachedPI = cacheGet(`post_insights:${postId}`, insightsTtl)
+    if (cachedPI) {
+      setPi(cachedPI)
+      onActionLog?.({ level: 'info', source: 'post_detail', action: 'load_post_insights_cache', message: `[Cache] Đọc insights post từ cache ${postId}`, meta: { accountId: account.id, postId } })
     }
+
+    const cachedReplies = cacheGet(`replies:${postId}`, repliesTtl)
+    if (cachedReplies && Array.isArray(cachedReplies) && cachedReplies.length > 0) {
+      setReplies(cachedReplies)
+      onActionLog?.({ level: 'info', source: 'post_detail', action: 'load_replies_cache', message: `[Cache] Đọc replies từ cache ${postId}`, meta: { accountId: account.id, postId, count: cachedReplies.length } })
+    }
+
     return () => { alive = false }
   }, [postId])
 
   const handleRefreshPI = async () => {
     setFetchingPI(true)
-    onActionLog?.({ level: 'info', source: 'post_detail', action: 'fetch_post_insights_start', message: `Bắt đầu lấy insights cho post ${postId}`, meta: { accountId: account.id, postId } })
+    onActionLog?.({ level: 'info', source: 'post_detail', action: 'fetch_post_insights_start', message: `[API] Bắt đầu lấy insights cho post ${postId}`, meta: { accountId: account.id, postId } })
     try {
       const data = await fetchPostInsights(postId, account.token, { settings, skipCache: true })
       setPi(data)
-      onActionLog?.({ level: 'info', source: 'post_detail', action: 'fetch_post_insights_ok', message: `Lấy insights post thành công ${postId}`, meta: { accountId: account.id, postId } })
+      onActionLog?.({ level: 'info', source: 'post_detail', action: 'fetch_post_insights_ok', message: `[API] Lấy insights post thành công ${postId}`, meta: { accountId: account.id, postId } })
     } catch (err) {
-      onActionLog?.({ level: 'warn', source: 'post_detail', action: 'fetch_post_insights_fail', message: err?.message || `Lấy insights post thất bại ${postId}`, meta: { accountId: account.id, postId } })
+      onActionLog?.({ level: 'warn', source: 'post_detail', action: 'fetch_post_insights_fail', message: `[API] ${err?.message || `Lấy insights post thất bại ${postId}`}`, meta: { accountId: account.id, postId } })
     }
     finally { setFetchingPI(false) }
   }
@@ -3945,13 +3963,14 @@ function PostDetailView({ account, postId, settings, navigate, onActionLog }) {
             <button
               onClick={async () => {
                 setLoadingReplies(true)
-                onActionLog?.({ level: 'info', source: 'post_detail', action: 'refresh_replies_start', message: `Bắt đầu làm mới replies cho post ${postId}`, meta: { accountId: account.id, postId } })
+                onActionLog?.({ level: 'info', source: 'post_detail', action: 'refresh_replies_start', message: `[API] Bắt đầu làm mới replies cho post ${postId}`, meta: { accountId: account.id, postId } })
                 try {
                   const { replies: data, nextCursor: cursor, hasMore: more } = await fetchRepliesPage(postId, account.token, { settings })
                   setReplies(data); setNextCursor(cursor); setHasMore(more)
-                  onActionLog?.({ level: 'info', source: 'post_detail', action: 'refresh_replies_ok', message: `Làm mới replies thành công cho post ${postId}`, meta: { accountId: account.id, postId, count: data.length } })
+                  cacheSet(`replies:${postId}`, data)
+                  onActionLog?.({ level: 'info', source: 'post_detail', action: 'refresh_replies_ok', message: `[API] Làm mới replies thành công cho post ${postId}`, meta: { accountId: account.id, postId, count: data.length } })
                 } catch (err) {
-                  onActionLog?.({ level: 'warn', source: 'post_detail', action: 'refresh_replies_fail', message: err?.message || `Làm mới replies thất bại cho post ${postId}`, meta: { accountId: account.id, postId } })
+                  onActionLog?.({ level: 'warn', source: 'post_detail', action: 'refresh_replies_fail', message: `[API] ${err?.message || `Làm mới replies thất bại cho post ${postId}`}`, meta: { accountId: account.id, postId } })
                 }
                 finally { setLoadingReplies(false) }
               }}
@@ -4051,7 +4070,11 @@ function PostDetailView({ account, postId, settings, navigate, onActionLog }) {
                   setLoadingMore(true)
                   try {
                     const { replies: more, nextCursor: cursor, hasMore: moreLeft } = await fetchRepliesPage(postId, account.token, { settings, after: nextCursor })
-                    setReplies(prev => [...prev, ...more])
+                    setReplies(prev => {
+                      const merged = [...prev, ...more]
+                      cacheSet(`replies:${postId}`, merged)
+                      return merged
+                    })
                     setNextCursor(cursor)
                     setHasMore(moreLeft)
                   } catch {}

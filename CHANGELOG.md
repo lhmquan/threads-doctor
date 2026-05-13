@@ -1,5 +1,21 @@
 # Changelog — Threads Doctor
 
+## v0.13.2 — 2026-05-13
+
+### Logs cải tiến
+- Thêm prefix màu `[API]` (xanh sky) và `[Cache]` (xanh lime) trong logs toàn tool để phân biệt rõ nguồn dữ liệu
+- Ghi log `[Cache]` khi vào trang chi tiết tài khoản/post đọc dữ liệu từ cache
+- Ghi log `[API]` cho mọi thao tác fetch thủ công (posts, insights, replies, reply, buff)
+
+### Cache & auto-fetch
+- Trang chi tiết tài khoản và chi tiết post không còn tự gọi API khi mở — chỉ đọc cache có sẵn
+- Replies được cache đúng chuẩn (lưu sau fetch/refresh/load more/send reply), không gọi lại mỗi lần click
+- Chỉ gọi API khi user bấm nút hoặc chạy theo lịch hẹn
+
+### Context menu
+- Thêm mục `Copy URL profile` vào menu chuột phải trên AccountCard
+- Sửa toàn bộ URL profile sang `threads.com` (chuẩn mới)
+
 ## v0.13.1 — 2026-05-12
 
 ### Buff mode update (Quote default)
