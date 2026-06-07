@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertTriangle, ArrowLeft, ArrowDownUp, BarChart2, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, Clock, ClipboardCopy, Database,
-  Download, ExternalLink, Filter, Home, Image as ImageIcon, KeyRound, List, Lock, MessageSquare, Moon, Plus,
+  AlertTriangle, ArrowLeft, ArrowDownUp, BarChart2, CheckCircle2, CheckSquare, ChevronDown, ChevronLeft, ChevronRight, Clock, ClipboardCopy, Database,
+  Download, ExternalLink, Filter, Home, Image as ImageIcon, KeyRound, List, Lock, Menu, MessageSquare, Moon, Plus,
   RefreshCw, Search, Send, Settings, Sparkles, Square, Stethoscope, Sun, Trash2, TrendingDown, TrendingUp, User, X,
 } from 'lucide-react'
-import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetchReplies, fetchRepliesPage, postReply, repostPost, createQuotePost, publishThreadsPost, resolveThreadsUrl, searchKeyword, maskToken, tokenFingerprint } from './lib/threads.js'
+import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetchReplies, fetchRepliesPage, postReply, repostPost, createQuotePost, publishThreadsPost, resolveThreadsUrl, fetchSyncTokens, searchKeyword, maskToken, tokenFingerprint } from './lib/threads.js'
 import { generateReply } from './lib/ai.js'
 import { parseThreadsUrl } from './lib/threads-url.js'
 import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline, loadSchedules, saveSchedules, loadScheduleLogs, saveScheduleLogs, loadAppLogs, saveAppLogs, loadBuffSchedules, saveBuffSchedules, loadBuffLogs, saveBuffLogs, loadBuffFavouriteWorkers, saveBuffFavouriteWorkers } from './lib/storage.js'
 import { cacheClear, cacheGet, cacheSet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
-const APP_VERSION = '0.13.2'
+const APP_VERSION = '0.14.0'
 const MAX_SCHEDULE_LOGS = 200
 const MAX_APP_LOGS = 1500
 const MAX_SCHEDULE_FAILURE_DETAILS = 12
@@ -65,6 +65,22 @@ function parseBulkUsernames(text) {
     .filter((v, i, a) => a.indexOf(v) === i)
 }
 
+function resolveTtlMs(settings, keys = [], fallbackMinutes = 30) {
+  for (const key of keys) {
+    const raw = settings?.[key]
+    if (raw != null && raw !== '') {
+      const n = Number(raw)
+      if (Number.isFinite(n) && n > 0) return n * 60 * 1000
+    }
+  }
+  const generic = settings?.cacheTTL
+  if (generic != null && generic !== '') {
+    const n = Number(generic)
+    if (Number.isFinite(n) && n > 0) return n * 60 * 1000
+  }
+  return fallbackMinutes * 60 * 1000
+}
+
 function isAccountLocked(account) {
   const url = account?.avatar || ''
   if (!url) return false
@@ -91,6 +107,19 @@ function normalizeAccountStatus(account) {
     return { ...account, status: 'blocked', error: account.error || 'Token bị block tạm thời' }
   }
   return account
+}
+
+function scheduleActionLabel(action) {
+  return action === 'refresh_token' ? 'Refresh token' : 'Fetch posts'
+}
+
+const homeViewState = {
+  statusFilter: 'all',
+  sortBy: 'default',
+  followersMin: '',
+  followersMax: '',
+  query: '',
+  page: 1,
 }
 
 function useTheme() {
@@ -425,7 +454,25 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const [accounts, setAccounts] = useState(() => loadAccounts())
   const [settings, setSettings] = useState(() => loadSettings())
   const [showSettings, setShowSettings] = useState(false)
-  const [query, setQuery] = useState('')
+  const [headerMenu, setHeaderMenu] = useState(null)
+  const syncMenuRef = useRef(null)
+  const menuMenuRef = useRef(null)
+  useEffect(() => {
+    if (!headerMenu) return
+    const onDocPointer = (e) => {
+      const t = e.target
+      if (syncMenuRef.current?.contains(t) || menuMenuRef.current?.contains(t)) return
+      setHeaderMenu(null)
+    }
+    const onEsc = (e) => { if (e.key === 'Escape') setHeaderMenu(null) }
+    document.addEventListener('mousedown', onDocPointer)
+    window.addEventListener('keydown', onEsc)
+    return () => {
+      document.removeEventListener('mousedown', onDocPointer)
+      window.removeEventListener('keydown', onEsc)
+    }
+  }, [headerMenu])
+  const [query, setQuery] = useState(homeViewState.query)
   const [urlMsg, setUrlMsg] = useState('')
   const [resolvingUrl, setResolvingUrl] = useState(false)
 
@@ -461,6 +508,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const [bulkLookupText, setBulkLookupText] = useState('')
   const [bulkLookupResult, setBulkLookupResult] = useState(null)
   const [bulkRunning, setBulkRunning] = useState(false)
+  const [syncRunning, setSyncRunning] = useState(false)
+  const [syncSummary, setSyncSummary] = useState(null)
   const [bulkLog, setBulkLog] = useState([])
   const [bulkFailed, setBulkFailed] = useState([])
   const [bulkProgress, setBulkProgress] = useState({ done: 0, total: 0 })
@@ -490,6 +539,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const fetchPostsAbort = useRef(false)
 
   const [scheduleMode, setScheduleMode] = useState('once')
+  const [scheduleAction, setScheduleAction] = useState(settings?.scheduleDefaultAction ?? 'fetch_posts')
   const [scheduleAt, setScheduleAt] = useState('')
   const [scheduleEveryValue, setScheduleEveryValue] = useState(settings?.scheduleDefaultRepeatValue ?? 10)
   const [scheduleRepeatUnit, setScheduleRepeatUnit] = useState(settings?.scheduleDefaultRepeatUnit ?? 'minute')
@@ -616,9 +666,31 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     for (let i = 0; i < targets.length; i++) {
       const target = targets[i]
       try {
-        await fetchPosts(target.id, target.token, { settings, limit: 10, skipCache: true })
+        if ((taskSnapshot.action || 'fetch_posts') === 'refresh_token') {
+          const info = await fetchMe(target.token, { settings, skipCache: true })
+          setAccounts(prev => prev.map(a => a.id === target.id ? {
+            ...a,
+            username: info.username,
+            name: info.name,
+            avatar: info.threads_profile_picture_url,
+            bio: info.threads_biography,
+            status: 'ok',
+            error: '',
+            lastCheck: Date.now(),
+          } : a))
+        } else {
+          await fetchPosts(target.id, target.token, { settings, limit: 10, skipCache: true })
+        }
         ok++
       } catch (err) {
+        if ((taskSnapshot.action || 'fetch_posts') === 'refresh_token') {
+          setAccounts(prev => prev.map(a => a.id === target.id ? {
+            ...a,
+            status: 'error',
+            error: err?.message || 'Refresh token thất bại',
+            lastCheck: Date.now(),
+          } : a))
+        }
         fail++
         if (failureDetails.length < MAX_SCHEDULE_FAILURE_DETAILS) {
           failureDetails.push({
@@ -668,6 +740,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       at: endedAt,
       taskId,
       type: 'run',
+      action: taskSnapshot.action || 'fetch_posts',
       mode: taskSnapshot.mode === 'repeat' ? `repeat-${taskSnapshot.repeatUnit || 'minute'}` : 'once',
       targetCount: targets.length,
       success: ok,
@@ -682,9 +755,10 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       level: fail > 0 ? 'warn' : 'info',
       source: 'scheduler',
       action: 'run',
-      message: `Scheduler run ${runStatus}: ok ${ok} / fail ${fail}`,
+      message: `Scheduler ${scheduleActionLabel(taskSnapshot.action || 'fetch_posts')} run ${runStatus}: ok ${ok} / fail ${fail}`,
       meta: {
         taskId,
+        schedulerAction: taskSnapshot.action || 'fetch_posts',
         targetCount: targets.length,
         durationSec,
         mode: taskSnapshot.mode,
@@ -749,6 +823,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const resetScheduleForm = useCallback(() => {
     setEditingScheduleId(null)
     setScheduleMode('once')
+    setScheduleAction(settings?.scheduleDefaultAction ?? 'fetch_posts')
     setScheduleAt('')
     setScheduleEveryValue(settings?.scheduleDefaultRepeatValue ?? 10)
     setScheduleRepeatUnit(settings?.scheduleDefaultRepeatUnit ?? 'minute')
@@ -779,6 +854,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       setScheduleDailySecond(task.dailySecond ?? (settings?.scheduleDefaultDailySecond ?? 0))
     }
     setScheduleTargetType(task.targetType === 'all' ? 'all' : 'selected')
+    setScheduleAction(task.action || 'fetch_posts')
     setScheduleDelaySec(task.delaySec ?? (settings?.scheduleDelaySec ?? 5))
     if (task.targetType === 'selected') {
       const accountSet = new Set(accounts.map(a => a.id))
@@ -817,6 +893,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     setSettings(prev => ({
       ...prev,
       scheduleDelaySec: delaySec,
+      scheduleDefaultAction: scheduleAction,
       scheduleDefaultRepeatValue: repeatValue,
       scheduleDefaultRepeatUnit: repeatUnit,
       scheduleDefaultDailyHour: dailyHour,
@@ -845,6 +922,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
         updatedAt: now,
         targetType: scheduleTargetType,
         snapshotIds,
+        action: scheduleAction,
         delaySec,
         nextRunAt: runAt,
         lastRunAt,
@@ -875,6 +953,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
         updatedAt: now,
         targetType: scheduleTargetType,
         snapshotIds,
+        action: scheduleAction,
         delaySec,
         nextRunAt,
         lastRunAt,
@@ -904,8 +983,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
         level: 'info',
         source: 'scheduler',
         action: 'update',
-        message: 'Đã cập nhật lịch chạy',
-        meta: { taskId: task.id, mode: task.mode, targetCount: snapshotIds.length },
+        message: `Đã cập nhật lịch chạy (${scheduleActionLabel(task.action || 'fetch_posts')})`,
+        meta: { taskId: task.id, mode: task.mode, schedulerAction: task.action || 'fetch_posts', targetCount: snapshotIds.length },
       })
       clearTaskTimer(task.id)
       armTask(task)
@@ -919,11 +998,11 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       level: 'info',
       source: 'scheduler',
       action: 'create',
-      message: 'Đã tạo lịch chạy mới',
-      meta: { taskId: task.id, mode: task.mode, targetCount: snapshotIds.length },
+      message: `Đã tạo lịch chạy mới (${scheduleActionLabel(task.action || 'fetch_posts')})`,
+      meta: { taskId: task.id, mode: task.mode, schedulerAction: task.action || 'fetch_posts', targetCount: snapshotIds.length },
     })
     armTask(task)
-  }, [accounts, appendAppLog, appendScheduleLog, armTask, clearTaskTimer, editingScheduleId, scheduleAt, scheduleDailyHour, scheduleDailyMinute, scheduleDailySecond, scheduleDelaySec, scheduleEveryValue, scheduleMode, scheduleRepeatUnit, scheduleTargetType, scheduledTasks, selectedIds, setSettings])
+  }, [accounts, appendAppLog, appendScheduleLog, armTask, clearTaskTimer, editingScheduleId, scheduleAction, scheduleAt, scheduleDailyHour, scheduleDailyMinute, scheduleDailySecond, scheduleDelaySec, scheduleEveryValue, scheduleMode, scheduleRepeatUnit, scheduleTargetType, scheduledTasks, selectedIds, setSettings])
 
   useEffect(() => {
     saveSchedules(scheduledTasks)
@@ -944,6 +1023,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     let normalized = scheduledTasks.map(task => {
       const next = { ...task }
       if (!next.id) next.id = `sch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+      if (!next.action) next.action = 'fetch_posts'
       if (next.status === 'running') next.status = 'active'
 
       if (next.status !== 'active') return next
@@ -1093,12 +1173,21 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   useEffect(() => { saveAccounts(accounts) }, [accounts])
   useEffect(() => { saveSettings(settings) }, [settings])
 
-  const [statusFilter, setStatusFilter] = useState('all')
-  const [sortBy, setSortBy] = useState('default')
-  const [followersMin, setFollowersMin] = useState('')
-  const [followersMax, setFollowersMax] = useState('')
-  const [page, setPage] = useState(1)
+  const [statusFilter, setStatusFilter] = useState(homeViewState.statusFilter)
+  const [sortBy, setSortBy] = useState(homeViewState.sortBy)
+  const [followersMin, setFollowersMin] = useState(homeViewState.followersMin)
+  const [followersMax, setFollowersMax] = useState(homeViewState.followersMax)
+  const [page, setPage] = useState(homeViewState.page)
   const [perPage, setPerPage] = useState(() => Number(localStorage.getItem('td.perPage')) || 20)
+
+  useEffect(() => {
+    homeViewState.statusFilter = statusFilter
+    homeViewState.sortBy = sortBy
+    homeViewState.followersMin = followersMin
+    homeViewState.followersMax = followersMax
+    homeViewState.query = query
+    homeViewState.page = page
+  }, [statusFilter, sortBy, followersMin, followersMax, query, page])
 
   const getDuplicateCaptions = (accountId) => {
     const posts = cacheGet(`posts:${accountId}:10`, (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000)
@@ -1194,7 +1283,12 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const safeP = Math.min(page, totalPages)
   const paged = filtered.slice((safeP - 1) * perPage, safeP * perPage)
 
+  const didInitFiltersRef = useRef(false)
   useEffect(() => {
+    if (!didInitFiltersRef.current) {
+      didInitFiltersRef.current = true
+      return
+    }
     setSelectedIds(new Set())
     setPage(1)
   }, [statusFilter, query, sortBy, followersMin, followersMax])
@@ -1385,19 +1479,23 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
 
   const [refreshingAll, setRefreshingAll] = useState(false)
   const refreshAll = useCallback(async () => {
+    const targetIds = selectedIds.size > 0 ? new Set(selectedIds) : null
+    const targets = targetIds ? accounts.filter(a => targetIds.has(a.id)) : accounts
+    if (targets.length === 0) return
+
     appendAppLog({
       level: 'info',
       source: 'account',
       action: 'refresh_all_start',
-      message: `Bắt đầu refresh ${accounts.length} tài khoản`,
-      meta: { total: accounts.length },
+      message: `Bắt đầu refresh ${targets.length} tài khoản`,
+      meta: { total: targets.length, selected: !!targetIds },
     })
     setRefreshingAll(true)
     const DELAY = (settings?.bulkDelay ?? 5) * 1000
     let ok = 0
     let fail = 0
-    for (let i = 0; i < accounts.length; i++) {
-      const acc = accounts[i]
+    for (let i = 0; i < targets.length; i++) {
+      const acc = targets[i]
       setAccounts(prev => prev.map(a => a.id === acc.id ? { ...a, status: 'loading' } : a))
       try {
         const info = await fetchMe(acc.token, { settings, skipCache: true })
@@ -1418,17 +1516,17 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
         } : a))
         fail++
       }
-      if (i < accounts.length - 1) await new Promise(r => setTimeout(r, DELAY))
+      if (i < targets.length - 1) await new Promise(r => setTimeout(r, DELAY))
     }
     appendAppLog({
       level: fail > 0 ? 'warn' : 'info',
       source: 'account',
       action: 'refresh_all_finish',
-      message: `Refresh all xong: ok ${ok} / fail ${fail}`,
-      meta: { total: accounts.length },
+      message: `Refresh xong: ok ${ok} / fail ${fail}`,
+      meta: { total: targets.length, selected: !!targetIds },
     })
     setRefreshingAll(false)
-  }, [accounts, appendAppLog, settings])
+  }, [accounts, appendAppLog, selectedIds, settings])
 
   const parseBulkTokens = useCallback((text) => {
     return text
@@ -1461,12 +1559,17 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     appendAppLog({
       level: 'info',
       source: 'bulk_import',
-      action: mode === 'retry_failed' ? 'retry_start' : 'start',
-      message: mode === 'retry_failed' ? `Bắt đầu thử lại ${tokens.length} token lỗi` : `Bắt đầu nạp hàng loạt ${tokens.length} token`,
+      action: mode === 'retry_failed' ? 'retry_start' : mode === 'sync_sheet' ? 'sync_start' : 'start',
+      message: mode === 'retry_failed'
+        ? `Bắt đầu thử lại ${tokens.length} token lỗi`
+        : mode === 'sync_sheet'
+          ? `Bắt đầu sync ${tokens.length} token từ Google Sheet`
+          : `Bắt đầu nạp hàng loạt ${tokens.length} token`,
       meta: { total: tokens.length },
     })
 
     setBulkRunning(true)
+    if (mode === 'sync_sheet') setSyncRunning(true)
     if (clearPrevious) setBulkLog([])
     setBulkFailed([])
     setBulkProgress({ done: 0, total: tokens.length })
@@ -1482,7 +1585,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           level: 'warn',
           source: 'bulk_import',
           action: 'stopped',
-          message: 'Nạp hàng loạt bị dừng bởi người dùng',
+          message: mode === 'sync_sheet' ? 'Sync Google Sheet bị dừng bởi người dùng' : 'Nạp hàng loạt bị dừng bởi người dùng',
           meta: { at: i, total: tokens.length, mode },
         })
         break
@@ -1504,23 +1607,42 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           error: '',
         }
         setAccounts(prev => {
-          const exists = prev.some(a => a.id === info.id)
-          if (exists) {
-            setBulkLog(p => [...p, { token: t, ok: true, msg: `Cập nhật: @${info.username}` }])
-            return prev.map(a => a.id === info.id ? { ...updated, addedAt: a.addedAt || updated.addedAt } : a)
+          const normUser = normalizeUsername(info.username)
+          const isConflict = (a) =>
+            (normUser && normalizeUsername(a.username) === normUser) ||
+            (info.id && a.id === info.id) ||
+            (a.token === t)
+
+          const conflicting = prev.filter(isConflict)
+          if (conflicting.length === 0) {
+            setBulkLog(p => [...p, { token: t, ok: true, msg: `@${info.username}` }])
+            return [updated, ...prev]
           }
-          const usernameDup = prev.find(a => a.username === info.username && a.id !== info.id)
-          if (usernameDup) {
-            setBulkLog(p => [...p, { token: t, ok: true, msg: `Cập nhật (username match): @${info.username}` }])
-            return prev.map(a => a.id === usernameDup.id ? { ...updated, addedAt: a.addedAt || updated.addedAt } : a)
+
+          const preservedAddedAt = conflicting.reduce(
+            (min, a) => (a.addedAt && (!min || a.addedAt < min)) ? a.addedAt : min,
+            null
+          )
+          const merged = { ...updated, addedAt: preservedAddedAt || updated.addedAt }
+
+          setBulkLog(p => [...p, {
+            token: t,
+            ok: true,
+            msg: conflicting.length > 1
+              ? `Cập nhật @${info.username} (gộp ${conflicting.length} bản ghi trùng)`
+              : `Cập nhật: @${info.username}`,
+          }])
+
+          let replaced = false
+          const next = []
+          for (const a of prev) {
+            if (isConflict(a)) {
+              if (!replaced) { next.push(merged); replaced = true }
+            } else {
+              next.push(a)
+            }
           }
-          const tokenDup = prev.find(a => a.token === t && a.id !== info.id)
-          if (tokenDup) {
-            setBulkLog(p => [...p, { token: t, ok: true, msg: `@${info.username} (thay thế token trùng)` }])
-            return [updated, ...prev.filter(a => a.id !== tokenDup.id)]
-          }
-          setBulkLog(p => [...p, { token: t, ok: true, msg: `@${info.username}` }])
-          return [updated, ...prev]
+          return next
         })
         appendAppLog({
           level: 'info',
@@ -1554,11 +1676,16 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     appendAppLog({
       level: nextFailed.length > 0 ? 'warn' : 'info',
       source: 'bulk_import',
-      action: mode === 'retry_failed' ? 'retry_finish' : 'finish',
-      message: mode === 'retry_failed' ? 'Hoàn tất thử lại token lỗi' : 'Hoàn tất phiên nạp hàng loạt',
+      action: mode === 'retry_failed' ? 'retry_finish' : mode === 'sync_sheet' ? 'sync_finish' : 'finish',
+      message: mode === 'retry_failed'
+        ? 'Hoàn tất thử lại token lỗi'
+        : mode === 'sync_sheet'
+          ? 'Hoàn tất phiên sync Google Sheet'
+          : 'Hoàn tất phiên nạp hàng loạt',
       meta: { total: tokens.length, failed: nextFailed.length, mode },
     })
     setBulkRunning(false)
+    if (mode === 'sync_sheet') setSyncRunning(false)
   }, [appendAppLog, settings])
 
   const handleBulkImport = useCallback(async () => {
@@ -1599,17 +1726,114 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     })
   }, [bulkFailed, bulkRunning, retryFailedBulkImport])
 
+  const handleSyncSheet = useCallback(async (hard = false) => {
+    appendAppLog({
+      level: 'info',
+      source: 'sync_sheet',
+      action: 'fetch_start',
+      message: hard ? '[API] Bắt đầu HARD SYNC token từ Google Sheet' : '[API] Bắt đầu lấy token từ Google Sheet',
+    })
+
+    setSyncSummary(null)
+
+    const sheetEntries = await fetchSyncTokens({ settings })
+    appendAppLog({
+      level: 'info',
+      source: 'sync_sheet',
+      action: 'fetch_ok',
+      message: `[API] Lấy thành công ${sheetEntries.length} dòng từ Google Sheet`,
+      meta: { sheetTotal: sheetEntries.length },
+    })
+
+    let syncEntries
+    let skippedLive
+    if (hard) {
+      syncEntries = sheetEntries
+      skippedLive = 0
+    } else {
+      const liveAccounts = accounts.filter(a => a.status === 'ok')
+      const liveIds = new Set(liveAccounts.map(a => String(a.id || '').trim()).filter(Boolean))
+      const liveUsernames = new Set(liveAccounts.map(a => normalizeUsername(a.username)).filter(Boolean))
+
+      syncEntries = sheetEntries.filter(e => {
+        const id = String(e.id || '').trim()
+        const uname = normalizeUsername(e.username)
+        if (id && liveIds.has(id)) return false
+        if (uname && liveUsernames.has(uname)) return false
+        return true
+      })
+      skippedLive = sheetEntries.length - syncEntries.length
+    }
+
+    const syncTokens = syncEntries
+      .map(e => e.token)
+      .filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i)
+
+    setSyncSummary({ sheetTotal: sheetEntries.length, skippedLive, syncTargets: syncTokens.length, hard })
+    appendAppLog({
+      level: 'info',
+      source: 'sync_sheet',
+      action: 'plan',
+      message: `[API] Kế hoạch ${hard ? 'hard sync' : 'sync'}: total ${sheetEntries.length}, skip live ${skippedLive}, sync ${syncTokens.length}`,
+      meta: { sheetTotal: sheetEntries.length, skippedLive, syncTargets: syncTokens.length, hard },
+    })
+
+    if (syncTokens.length === 0) {
+      appendAppLog({
+        level: 'info',
+        source: 'sync_sheet',
+        action: 'noop',
+        message: hard ? '[API] Sheet không có token nào để sync' : '[API] Không có token nào cần sync (tất cả account đã live)',
+        meta: { sheetTotal: sheetEntries.length, skippedLive },
+      })
+      return
+    }
+
+    await runBulkImportTokens(syncTokens, { mode: 'sync_sheet', clearPrevious: true })
+  }, [accounts, appendAppLog, runBulkImportTokens, settings])
+
+  const confirmSyncSheet = useCallback((hard = false) => {
+    if (bulkRunning || syncRunning) return
+    setConfirmBulkAction({
+      type: 'sync_sheet',
+      title: hard ? 'Xác nhận HARD SYNC Google Sheet' : 'Xác nhận Sync Google Sheet',
+      message: hard
+        ? 'Bạn có chắc muốn HARD SYNC toàn bộ dữ liệu mới nhất từ Google Sheet?'
+        : 'Bạn có chắc muốn gọi N8N để sync token mới nhất từ Google Sheet?',
+      dangerNote: hard
+        ? 'Hard sync sẽ import lại TẤT CẢ token từ Sheet (không skip live). Trùng username sẽ ghi đè dữ liệu mới nhất, username mới sẽ tạo data mới.'
+        : 'Tool sẽ bỏ qua account đang live và chỉ import lại nhóm account die/lỗi.',
+      confirmLabel: hard ? 'Bắt đầu Hard Sync' : 'Bắt đầu Sync',
+      run: () => {
+        handleSyncSheet(hard).catch((err) => {
+          appendAppLog({
+            level: 'error',
+            source: 'sync_sheet',
+            action: 'fetch_fail',
+            message: err?.message || 'Sync Google Sheet thất bại',
+          })
+          setSyncRunning(false)
+        })
+      },
+    })
+  }, [appendAppLog, bulkRunning, handleSyncSheet, syncRunning])
+
   const confirmRefreshAll = useCallback(() => {
     if (accounts.length === 0 || refreshingAll) return
+    const targetCount = selectedIds.size > 0 ? selectedIds.size : accounts.length
+    const isSelectedMode = selectedIds.size > 0
     setConfirmBulkAction({
       type: 'refresh_all',
-      title: 'Xác nhận refresh toàn bộ',
-      message: `Bạn có chắc muốn refresh token cho toàn bộ ${accounts.length} tài khoản?`,
+      title: isSelectedMode ? 'Xác nhận refresh tài khoản đã chọn' : 'Xác nhận refresh toàn bộ',
+      message: isSelectedMode
+        ? `Bạn có chắc muốn refresh token cho ${targetCount} tài khoản đã chọn?`
+        : `Bạn có chắc muốn refresh token cho toàn bộ ${targetCount} tài khoản?`,
       dangerNote: 'Tác vụ sẽ chạy tuần tự và có delay giữa các request.',
-      confirmLabel: 'Refresh all',
+      confirmLabel: isSelectedMode ? 'Refresh đã chọn' : 'Refresh all',
       run: refreshAll,
     })
-  }, [accounts.length, refreshAll, refreshingAll])
+  }, [accounts.length, refreshAll, refreshingAll, selectedIds.size])
 
   const confirmFetchAllPosts = useCallback(() => {
     if (selectedIds.size === 0 || fetchingAllPosts) return
@@ -1670,36 +1894,77 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
             >
               {dark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
-            <button
-              onClick={() => navigate('/scheduler')}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
-            >
-              <Clock className="w-4 h-4" /> Hẹn giờ
-            </button>
-            <button
-              onClick={() => navigate('/logs')}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
-            >
-              <List className="w-4 h-4" /> Logs
-            </button>
+
+            <div className="relative" ref={syncMenuRef}>
+              <button
+                onClick={() => setHeaderMenu(m => m === 'sync' ? null : 'sync')}
+                disabled={bulkRunning || syncRunning}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 disabled:opacity-50 text-sm"
+              >
+                <RefreshCw className={`w-4 h-4 ${syncRunning ? 'animate-spin' : ''}`} /> Sync <ChevronDown className="w-3.5 h-3.5" />
+              </button>
+              {headerMenu === 'sync' && (
+                <div className="absolute right-0 mt-1 z-50 w-56 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-lg p-1">
+                  <button
+                    onClick={() => { setHeaderMenu(null); confirmSyncSheet(false) }}
+                    className="w-full text-left px-3 py-1.5 rounded-lg text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800 inline-flex items-center gap-2"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> Sync (chỉ account die)
+                  </button>
+                  <button
+                    onClick={() => { setHeaderMenu(null); confirmSyncSheet(true) }}
+                    className="w-full text-left px-3 py-1.5 rounded-lg text-sm text-amber-500 dark:text-amber-300 hover:bg-amber-500/10 inline-flex items-center gap-2"
+                  >
+                    <Database className="w-3.5 h-3.5" /> Hard Sync (toàn bộ)
+                  </button>
+                </div>
+              )}
+            </div>
+
             <button
               onClick={() => navigate('/interact')}
               className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-medium"
             >
               <Search className="w-4 h-4" /> Tương tác
             </button>
-            <button
-              onClick={() => navigate('/buff')}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
-            >
-              <TrendingUp className="w-4 h-4" /> Buff
-            </button>
-            <button
-              onClick={() => setShowSettings(v => !v)}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
-            >
-              <Settings className="w-4 h-4" /> Cài đặt
-            </button>
+
+            <div className="relative" ref={menuMenuRef}>
+              <button
+                onClick={() => setHeaderMenu(m => m === 'menu' ? null : 'menu')}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-900 text-sm"
+              >
+                <Menu className="w-4 h-4" /> Menu <ChevronDown className="w-3.5 h-3.5" />
+              </button>
+              {headerMenu === 'menu' && (
+                <div className="absolute right-0 mt-1 z-50 w-44 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-lg p-1">
+                  <button
+                    onClick={() => { setHeaderMenu(null); navigate('/scheduler') }}
+                    className="w-full text-left px-3 py-1.5 rounded-lg text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800 inline-flex items-center gap-2"
+                  >
+                    <Clock className="w-3.5 h-3.5" /> Hẹn giờ
+                  </button>
+                  <button
+                    onClick={() => { setHeaderMenu(null); navigate('/buff') }}
+                    className="w-full text-left px-3 py-1.5 rounded-lg text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800 inline-flex items-center gap-2"
+                  >
+                    <TrendingUp className="w-3.5 h-3.5" /> Buff
+                  </button>
+                  <button
+                    onClick={() => { setHeaderMenu(null); navigate('/logs') }}
+                    className="w-full text-left px-3 py-1.5 rounded-lg text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800 inline-flex items-center gap-2"
+                  >
+                    <List className="w-3.5 h-3.5" /> Logs
+                  </button>
+                  <div className="my-1 h-px bg-neutral-200 dark:bg-neutral-700" />
+                  <button
+                    onClick={() => { setHeaderMenu(null); setShowSettings(v => !v) }}
+                    className="w-full text-left px-3 py-1.5 rounded-lg text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800 inline-flex items-center gap-2"
+                  >
+                      <Settings className="w-3.5 h-3.5" /> Cài đặt
+                    </button>
+                  </div>
+              )}
+            </div>
           </div>
         </div>
       </header>
@@ -1871,6 +2136,40 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
             />
           )}
         </section>
+
+        {path !== '/scheduler' && path !== '/logs' && (syncSummary || syncRunning) && (
+          <section className="rounded-2xl border border-sky-500/30 bg-sky-500/5 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sky-300">
+                <RefreshCw className={`w-4 h-4 ${syncRunning ? 'animate-spin' : ''}`} />
+                <h3 className="text-sm font-medium">{syncSummary?.hard ? 'Hard Sync Google Sheet' : 'Sync Google Sheet'}</h3>
+              </div>
+              {syncRunning && (
+                <button onClick={() => { bulkAbort.current = true }} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-rose-800 text-rose-400 hover:bg-rose-500/10 text-xs">
+                  <X className="w-3.5 h-3.5" /> Dừng
+                </button>
+              )}
+            </div>
+            {syncSummary && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-300">
+                <span className="px-2 py-1 rounded border border-neutral-700">Sheet: {syncSummary.sheetTotal}</span>
+                <span className="px-2 py-1 rounded border border-emerald-500/40 text-emerald-300">Skip live: {syncSummary.skippedLive}</span>
+                <span className="px-2 py-1 rounded border border-amber-500/40 text-amber-300">Cần sync: {syncSummary.syncTargets}</span>
+                <span className="px-2 py-1 rounded border border-neutral-700">Delay: {settings?.bulkDelay ?? 5}s/token</span>
+                {syncRunning && <span className="px-2 py-1 rounded border border-sky-500/40 text-sky-300">Tiến độ: {bulkProgress.done}/{bulkProgress.total}</span>}
+              </div>
+            )}
+            {bulkLog.length > 0 && (
+              <div className="max-h-36 overflow-y-auto rounded-lg bg-neutral-100 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 p-3 space-y-1">
+                {bulkLog.map((l, i) => (
+                  <div key={i} className={`text-xs font-mono ${l.ok ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {l.ok ? '✓' : '✗'} {maskToken(l.token)} — {l.msg}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
           </>
         )}
 
@@ -2055,7 +2354,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           {path === '/scheduler' && (
             <div className="mb-4 p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 space-y-3">
               <div className="flex items-center justify-between">
-                <h3 className="text-sm font-medium text-amber-300">Hẹn giờ fetch posts</h3>
+                <h3 className="text-sm font-medium text-amber-300">Hẹn Giờ</h3>
                 <div className="flex items-center gap-2">
                   {scheduleRunning && <span className="text-xs text-indigo-300 inline-flex items-center gap-1"><RefreshCw className="w-3 h-3 animate-spin" /> Đang chạy lịch...</span>}
                   <button
@@ -2067,7 +2366,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                 </div>
               </div>
 
-              <div className="grid md:grid-cols-5 gap-2">
+              <div className="grid md:grid-cols-6 gap-2">
                 <label className="text-xs text-neutral-400">
                   Chế độ
                   <select
@@ -2077,6 +2376,18 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                   >
                     <option value="once">Hẹn 1 lần</option>
                     <option value="repeat">Lặp theo chu kỳ</option>
+                  </select>
+                </label>
+
+                <label className="text-xs text-neutral-400">
+                  Action
+                  <select
+                    value={scheduleAction}
+                    onChange={(e) => setScheduleAction(e.target.value)}
+                    className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                  >
+                    <option value="fetch_posts">Fetch posts</option>
+                    <option value="refresh_token">Refresh token</option>
                   </select>
                 </label>
 
@@ -2261,6 +2572,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                             <span className="font-medium">{task.mode === 'once'
                               ? '1 lần'
                               : `Lặp mỗi ${task.everyValue} ${task.repeatUnit === 'day' ? 'ngày' : task.repeatUnit === 'hour' ? 'giờ' : 'phút'}${task.repeatUnit === 'day' && Number.isFinite(task.dailyHour) && Number.isFinite(task.dailyMinute) && Number.isFinite(task.dailySecond) ? ` lúc ${String(task.dailyHour).padStart(2, '0')}:${String(task.dailyMinute).padStart(2, '0')}:${String(task.dailySecond).padStart(2, '0')}` : ''}`}</span>
+                            {' · '}action <strong>{scheduleActionLabel(task.action || 'fetch_posts')}</strong>
                             {' · '}target <strong>{task.targetType === 'all' ? 'All' : 'Selected'}</strong>
                             {' · '}snapshot <strong>{task.snapshotIds?.length || 0}</strong>
                           </div>
@@ -2315,7 +2627,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                     {scheduleLogs.map((l) => (
                       <div key={l.id} className="text-xs font-mono text-neutral-300">
                         <div className="flex items-center justify-between gap-2">
-                          <span>{new Date(l.at).toLocaleString()} · {l.taskId} · {l.type}</span>
+                          <span>{new Date(l.at).toLocaleString()} · {l.taskId} · {l.type}{l.type === 'run' ? ` · ${scheduleActionLabel(l.action || 'fetch_posts')}` : ''}</span>
                           {l.type === 'run'
                             ? <span className={l.fail > 0 ? 'text-amber-300' : 'text-emerald-300'}>ok {l.success} / fail {l.fail} · {l.durationSec}s</span>
                             : <span className="text-neutral-400">{l.message || ''}</span>}
@@ -2520,6 +2832,8 @@ function SettingsPanel({ settings, setSettings }) {
   const [testMsg, setTestMsg] = useState('')
   const [tokenCacheInput, setTokenCacheInput] = useState('')
   const [tokenCacheMsg, setTokenCacheMsg] = useState('')
+  const [autoLaunchEnabled, setAutoLaunchEnabled] = useState(false)
+  const [autoLaunchLoading, setAutoLaunchLoading] = useState(false)
 
   const isTestUrl = /\/webhook-test\//.test(webhookUrl)
 
@@ -2563,6 +2877,27 @@ function SettingsPanel({ settings, setSettings }) {
     localStorage.removeItem(keyLegacy)
     setTokenCacheMsg(existed ? `Đã xóa cache me (fp: ${fp}, legacy: ${tail})` : `Không tìm thấy cache me cho token này`)
     setTimeout(() => setTokenCacheMsg(''), 3000)
+  }
+
+  useEffect(() => {
+    let alive = true
+    if (!window.electronAPI?.getAutoLaunch) return
+    setAutoLaunchLoading(true)
+    window.electronAPI.getAutoLaunch()
+      .then((enabled) => { if (alive) setAutoLaunchEnabled(!!enabled) })
+      .catch(() => {})
+      .finally(() => { if (alive) setAutoLaunchLoading(false) })
+    return () => { alive = false }
+  }, [])
+
+  const handleToggleAutoLaunch = async () => {
+    if (!window.electronAPI?.setAutoLaunch) return
+    setAutoLaunchLoading(true)
+    try {
+      const next = await window.electronAPI.setAutoLaunch(!autoLaunchEnabled)
+      setAutoLaunchEnabled(!!next)
+    } catch {}
+    finally { setAutoLaunchLoading(false) }
   }
 
   return (
@@ -2625,6 +2960,24 @@ function SettingsPanel({ settings, setSettings }) {
           </div>
           {tokenCacheMsg && <div className="text-xs text-neutral-400">{tokenCacheMsg}</div>}
         </div>
+        <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-3 space-y-2">
+          <div className="text-xs text-neutral-300 font-medium">Khởi động cùng Windows</div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs text-neutral-400">Bật app tự chạy khi đăng nhập Windows</span>
+            <button
+              onClick={handleToggleAutoLaunch}
+              disabled={autoLaunchLoading || !window.electronAPI?.setAutoLaunch}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs ${autoLaunchEnabled ? 'border-emerald-600 text-emerald-300 hover:bg-emerald-500/10' : 'border-neutral-300 dark:border-neutral-800 text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-900'} disabled:opacity-50`}
+            >
+              {autoLaunchLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : null}
+              {autoLaunchEnabled ? 'Đang bật' : 'Đang tắt'}
+            </button>
+          </div>
+          {!window.electronAPI?.setAutoLaunch && (
+            <div className="text-[11px] text-neutral-500">Chỉ hỗ trợ khi chạy bản Electron desktop.</div>
+          )}
+        </div>
+
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <p className="text-xs text-neutral-400 dark:text-neutral-500">
             Hiện tại: <code className="px-1 rounded bg-neutral-200 dark:bg-neutral-800">{settings.webhookUrl || '(chưa đặt)'}</code>
@@ -3107,7 +3460,7 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
   const loading = a.status === 'loading'
   const isErr = a.status === 'error' || a.status === 'locked' || a.status === 'blocked'
 
-  const cached = cacheGet(`posts:${a.id}:10`, (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000)
+  const cached = cacheGet(`posts:${a.id}:10`, resolveTtlMs(settings, ['cacheTTLPosts', 'cacheTTLPost', 'cacheTTLReplies'], 30))
   const [lastPostTime, setLastPostTime] = useState(() => {
     if (cached && cached.length > 0) return cached[0].timestamp || null
     return undefined
@@ -3116,12 +3469,12 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
 
   useEffect(() => {
     if (fetchTick === 0) return
-    const fresh = cacheGet(`posts:${a.id}:10`, (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000)
+    const fresh = cacheGet(`posts:${a.id}:10`, resolveTtlMs(settings, ['cacheTTLPosts', 'cacheTTLPost', 'cacheTTLReplies'], 30))
     if (fresh && fresh.length > 0) setLastPostTime(fresh[0].timestamp || null)
     else if (fresh) setLastPostTime(null)
   }, [fetchTick])
 
-  const cachedInsights = cacheGet(`insights:${a.id}`, (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000)
+  const cachedInsights = cacheGet(`insights:${a.id}`, resolveTtlMs(settings, ['cacheTTLInsights', 'cacheTTLPosts', 'cacheTTL'], 30))
   const [insights, setInsights] = useState(cachedInsights || undefined)
   const [fetchingInsights, setFetchingInsights] = useState(false)
 
@@ -3441,8 +3794,8 @@ function ProfileView({ account, settings, navigate, followersBaseline = {}, setF
   }
 
   useEffect(() => {
-    const postsTtl = (settings?.cacheTTLPosts ?? 30) * 60 * 1000 || 30 * 60 * 1000
-    const insightsTtl = (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000
+    const postsTtl = resolveTtlMs(settings, ['cacheTTLPosts', 'cacheTTLPost', 'cacheTTL'], 30)
+    const insightsTtl = resolveTtlMs(settings, ['cacheTTLInsights', 'cacheTTLPosts', 'cacheTTL'], 30)
 
     const cachedPosts = cacheGet(`posts:${account.id}:10`, postsTtl)
     if (Array.isArray(cachedPosts)) {
@@ -3820,25 +4173,38 @@ function PostDetailView({ account, postId, settings, navigate, onActionLog }) {
     } finally { setSendingReply(false) }
   }
 
+  const [fetchingPost, setFetchingPost] = useState(false)
+
+  const handleLoadPost = async () => {
+    setFetchingPost(true)
+    setError('')
+    onActionLog?.({ level: 'info', source: 'post_detail', action: 'fetch_post_start', message: `[API] Bắt đầu lấy chi tiết post ${postId}`, meta: { accountId: account.id, postId } })
+    try {
+      const data = await fetchPost(postId, account.token, { settings, skipCache: true })
+      setPost(data)
+      cacheSet(`post:${postId}`, data)
+      onActionLog?.({ level: 'info', source: 'post_detail', action: 'fetch_post_ok', message: `[API] Lấy chi tiết post thành công ${postId}`, meta: { accountId: account.id, postId } })
+    } catch (err) {
+      setError(err.message)
+      onActionLog?.({ level: 'warn', source: 'post_detail', action: 'fetch_post_fail', message: `[API] ${err?.message || `Lấy chi tiết post thất bại ${postId}`}`, meta: { accountId: account.id, postId } })
+    } finally {
+      setFetchingPost(false)
+    }
+  }
+
   useEffect(() => {
     let alive = true
-    const repliesTtl = (settings?.cacheTTLReplies ?? 10) * 60 * 1000 || 10 * 60 * 1000
-    const insightsTtl = (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000
-    const postTtl = (settings?.cacheTTLPost ?? 30) * 60 * 1000 || 30 * 60 * 1000
+    const repliesTtl = resolveTtlMs(settings, ['cacheTTLReplies', 'cacheTTLPosts', 'cacheTTL'], 10)
+    const insightsTtl = resolveTtlMs(settings, ['cacheTTLInsights', 'cacheTTLPosts', 'cacheTTL'], 30)
+    const postTtl = resolveTtlMs(settings, ['cacheTTLPost', 'cacheTTLPosts', 'cacheTTL'], 30)
 
-    setLoading(true); setError('')
-    setReplies([]); setNextCursor(null); setHasMore(false); setPi(null)
+    setLoading(false); setError('')
+    setReplies([]); setNextCursor(null); setHasMore(false); setPi(null); setPost(null)
 
     const cachedPost = cacheGet(`post:${postId}`, postTtl)
     if (cachedPost) {
       setPost(cachedPost)
-      setLoading(false)
       onActionLog?.({ level: 'info', source: 'post_detail', action: 'load_post_cache', message: `[Cache] Đọc post từ cache ${postId}`, meta: { accountId: account.id, postId } })
-    } else {
-      fetchPost(postId, account.token, { settings })
-        .then(p => { if (alive) setPost(p) })
-        .catch(err => { if (alive) setError(err.message) })
-        .finally(() => { if (alive) setLoading(false) })
     }
 
     const cachedPI = cacheGet(`post_insights:${postId}`, insightsTtl)
@@ -3879,6 +4245,15 @@ function PostDetailView({ account, postId, settings, navigate, onActionLog }) {
       {error && (
         <div className="rounded-lg border border-rose-800 bg-rose-500/10 p-4 text-sm text-rose-400">
           <AlertTriangle className="w-4 h-4 inline mr-2" />{error}
+        </div>
+      )}
+      {!post && !loading && (
+        <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900/50 p-4 text-sm text-neutral-400 flex items-center justify-between gap-3">
+          <span>Chưa có cache chi tiết post cho bài này. Bấm để lấy dữ liệu từ API.</span>
+          <button onClick={handleLoadPost} disabled={fetchingPost} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50 text-xs">
+            {fetchingPost ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            {fetchingPost ? 'Đang lấy...' : 'Lấy chi tiết post'}
+          </button>
         </div>
       )}
       {post && (

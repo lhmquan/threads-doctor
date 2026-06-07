@@ -1,5 +1,37 @@
 # Changelog — Threads Doctor
 
+## v0.14.0 — 2026-06-03
+
+### Google Sheet Sync
+- Thêm nút `Sync` để gọi webhook N8N lấy danh sách token mới nhất từ Google Sheet
+- Tool tự phân tích token từ nhiều response shape phổ biến (`tokens[]`, `data[]`, array raw, object có key `Token`) và dedupe trước khi xử lý
+- Sync (thường) đối chiếu theo `ID` + `username`: bỏ qua account đang `live`, chỉ import lại nhóm account die/lỗi
+- Thêm `Hard Sync`: đồng bộ toàn bộ dữ liệu mới nhất từ Sheet (không skip live), trùng username thì ghi đè, username mới thì tạo data mới
+- Gia cố upsert chống trùng: dùng username chuẩn hoá làm khóa chính, gộp các bản ghi trùng `id/username/token` về 1
+- Tái dùng luồng bulk import để sync tuần tự, hiển thị tiến trình, log theo dòng, failed list và app logs đầy đủ
+- Panel theo dõi `Sync Google Sheet`: tổng token Sheet, số skip live, số cần sync, delay/token, tiến độ
+
+### UI / UX
+- Gom header gọn lại: `Home · Theme · Sync▾ · Tương tác · Menu▾` (dropdown Sync + Menu)
+- Fix dropdown header không tự đóng khi click ra ngoài (do backdrop-blur), chuyển sang listener click-ngoài + ESC
+- Giữ nguyên bộ lọc/trang khi vào chi tiết tài khoản rồi back lại (không còn reset về trang chủ)
+
+### Refresh selected fix
+- Nút `Refresh All` giờ hoạt động đúng theo selection:
+  - không chọn gì → refresh toàn bộ
+  - đã chọn account → chỉ refresh nhóm account đã chọn
+
+### Scheduler action mở rộng
+- Trang `Hẹn Giờ` hỗ trợ chọn action `Fetch posts` hoặc `Refresh token`
+- Logs scheduler và app logs ghi rõ action đã chạy để dễ theo dõi
+
+## v0.13.3 — 2026-05-20
+
+### Desktop UX / Tray
+- Bổ sung cơ chế close-to-tray: bấm nút đóng cửa sổ sẽ ẩn app xuống system tray thay vì thoát hẳn
+- Thêm tray menu chuột phải: Mở app, bật/tắt khởi động cùng Windows, Thoát
+- Cải thiện IPC auto-launch (`get/set`) để toggle trạng thái ổn định hơn trên Windows
+
 ## v0.13.2 — 2026-05-13
 
 ### Logs cải tiến

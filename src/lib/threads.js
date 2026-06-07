@@ -30,7 +30,7 @@ export function getWebhookUrl(settings) {
   return (settings?.webhookUrl || '').trim()
 }
 
-async function callWebhook({ webhookUrl, apiKey, payload }) {
+async function callWebhook({ webhookUrl, apiKey, payload, raw = false }) {
   if (!webhookUrl) {
     throw new Error('Chưa cấu hình Webhook URL trong Cài đặt')
   }
@@ -59,6 +59,7 @@ async function callWebhook({ webhookUrl, apiKey, payload }) {
     }
     throw new Error(json?.error || `Webhook HTTP ${res.status}`)
   }
+  if (raw) return json
   if (Array.isArray(json)) json = json[0] || {}
   if (json && typeof json === 'object' && 'ok' in json) {
     if (!json.ok) throw new Error(json.error || 'Webhook trả về lỗi')
@@ -356,6 +357,52 @@ export async function publishThreadsPost(userId, token, { settings, creationId }
   })
   if (!pubRes?.id) throw new Error('Publish thất bại — không nhận được media ID')
   return pubRes
+}
+
+export async function fetchSyncTokens({ settings } = {}) {
+  const res = await callWebhook({
+    webhookUrl: getWebhookUrl(settings),
+    apiKey: settings?.apiKey,
+    payload: { action: 'syncTokens', method: 'POST' },
+    raw: true,
+  })
+
+  const entries = []
+
+  function pushEntry(obj) {
+    const token = String(obj.token || obj.Token || obj.access_token || obj.accessToken || '').trim()
+    if (!token) return
+    const id = String(obj.id || obj.ID || obj.user_id || obj.userId || '').trim()
+    const username = String(obj.username || obj.User || obj.user || obj.profile || '').trim()
+    entries.push({ token, id, username })
+  }
+
+  function walk(value) {
+    if (!value) return
+    if (typeof value === 'string') {
+      const t = value.trim()
+      if (t) entries.push({ token: t, id: '', username: '' })
+      return
+    }
+    if (Array.isArray(value)) { value.forEach(walk); return }
+    if (typeof value === 'object') {
+      const hasToken = value.token || value.Token || value.access_token || value.accessToken
+      if (hasToken) { pushEntry(value); return }
+      if (Array.isArray(value.tokens)) { value.tokens.forEach(walk); return }
+      if (Array.isArray(value.data)) { value.data.forEach(walk); return }
+      if (Array.isArray(value.items)) { value.items.forEach(walk); return }
+      if (value.json) { walk(value.json); return }
+    }
+  }
+
+  walk(res)
+
+  const seen = new Set()
+  return entries.filter(e => {
+    if (!e.token || seen.has(e.token)) return false
+    seen.add(e.token)
+    return true
+  })
 }
 
 export async function searchKeyword(token, { settings, q, searchType, searchMode, mediaType, authorUsername, since, until, limit, skipCache = false } = {}) {
