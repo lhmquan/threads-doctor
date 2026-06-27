@@ -20,3 +20,7 @@ Stop and fix it first, then continue coding.
 
 ## Rotation rule
 If a token/key was pasted in chat, logs, or commits: rotate immediately.
+
+## Chi tiết
+Xem `docs/SECURITY.md` để biết: danh sách dữ liệu cấm commit, lệnh scan secret,
+quy trình revoke token, và cách bật pre-commit hook (`git config core.hooksPath .githooks`).

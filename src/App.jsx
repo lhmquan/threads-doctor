@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowLeft, ArrowDownUp, BarChart2, CheckCircle2, CheckSquare, ChevronDown, ChevronLeft, ChevronRight, Clock, ClipboardCopy, Database,
-  Download, ExternalLink, Filter, Home, Image as ImageIcon, KeyRound, List, Lock, Menu, MessageSquare, Moon, Plus,
-  RefreshCw, Search, Send, Settings, Sparkles, Square, Stethoscope, Sun, Trash2, TrendingDown, TrendingUp, User, X,
+  Download, ExternalLink, FileDown, Filter, Home, Image as ImageIcon, KeyRound, LayoutGrid, List, Lock, Menu, MessageSquare, Moon, Plus,
+  RefreshCw, Rows3, Search, Send, Settings, Sparkles, Square, Stethoscope, Sun, Trash2, TrendingDown, TrendingUp, User, X,
 } from 'lucide-react'
 import { fetchMe, fetchPost, fetchPosts, fetchInsights, fetchPostInsights, fetchReplies, fetchRepliesPage, postReply, repostPost, createQuotePost, publishThreadsPost, resolveThreadsUrl, fetchSyncTokens, searchKeyword, maskToken, tokenFingerprint } from './lib/threads.js'
 import { generateReply } from './lib/ai.js'
@@ -10,7 +10,7 @@ import { parseThreadsUrl } from './lib/threads-url.js'
 import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline, loadSchedules, saveSchedules, loadScheduleLogs, saveScheduleLogs, loadAppLogs, saveAppLogs, loadBuffSchedules, saveBuffSchedules, loadBuffLogs, saveBuffLogs, loadBuffFavouriteWorkers, saveBuffFavouriteWorkers } from './lib/storage.js'
 import { cacheClear, cacheGet, cacheSet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
-const APP_VERSION = '0.14.0'
+const APP_VERSION = '0.15.0'
 const MAX_SCHEDULE_LOGS = 200
 const MAX_APP_LOGS = 1500
 const MAX_SCHEDULE_FAILURE_DETAILS = 12
@@ -110,7 +110,9 @@ function normalizeAccountStatus(account) {
 }
 
 function scheduleActionLabel(action) {
-  return action === 'refresh_token' ? 'Refresh token' : 'Fetch posts'
+  if (action === 'refresh_token') return 'Refresh token'
+  if (action === 'hard_sync') return 'Hard Sync'
+  return 'Fetch posts'
 }
 
 const homeViewState = {
@@ -120,6 +122,14 @@ const homeViewState = {
   followersMax: '',
   query: '',
   page: 1,
+}
+
+function parseSearchTokens(input) {
+  if (!input) return []
+  return String(input)
+    .split(/[\n,;]+/)
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean)
 }
 
 function useTheme() {
@@ -454,6 +464,32 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const [accounts, setAccounts] = useState(() => loadAccounts())
   const [settings, setSettings] = useState(() => loadSettings())
   const [showSettings, setShowSettings] = useState(false)
+  // Trạng thái auto-update (kéo bản mới từ GitHub Release)
+  const [updateStatus, setUpdateStatus] = useState(null)
+  const [updateBusy, setUpdateBusy] = useState(false)
+  useEffect(() => {
+    if (!window.electronAPI?.update?.onStatus) return
+    return window.electronAPI.update.onStatus(setUpdateStatus)
+  }, [])
+  const handleCheckUpdate = useCallback(async () => {
+    // Trong app đã đóng gói: kiểm tra + tự tải bản mới từ GitHub Release.
+    // Ngoài app (chạy web): reload trang như cũ.
+    if (!window.electronAPI?.update?.check) {
+      window.location.reload()
+      return
+    }
+    setUpdateBusy(true)
+    setUpdateStatus({ state: 'checking' })
+    try {
+      await window.electronAPI.update.check()
+    } finally {
+      setUpdateBusy(false)
+    }
+  }, [])
+  const handleInstallUpdate = useCallback(async () => {
+    if (!window.electronAPI?.update?.install) return
+    await window.electronAPI.update.install().catch(() => {})
+  }, [])
   const [headerMenu, setHeaderMenu] = useState(null)
   const syncMenuRef = useRef(null)
   const menuMenuRef = useRef(null)
@@ -480,7 +516,9 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     const val = e.target.value
     setQuery(val)
     setUrlMsg('')
-    const parsed = parseThreadsUrl(val)
+    const trimmed = val.trim()
+    if (trimmed.includes('\n') || trimmed.includes(',')) return
+    const parsed = parseThreadsUrl(trimmed)
     if (!parsed) return
     const account = accounts.find(a => a.username === parsed.username)
     if (!account) {
@@ -490,7 +528,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     setResolvingUrl(true)
     setUrlMsg('Đang resolve post ID...')
     try {
-      const { postId } = await resolveThreadsUrl(val, { settings })
+      const { postId } = await resolveThreadsUrl(trimmed, { settings })
       setQuery('')
       setUrlMsg('')
       navigate(`/${account.id}/post/${postId}`)
@@ -549,6 +587,13 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const [scheduleTargetType, setScheduleTargetType] = useState('selected')
   const [scheduleDelaySec, setScheduleDelaySec] = useState(settings?.scheduleDelaySec ?? 5)
   const [scheduleMsg, setScheduleMsg] = useState('')
+  const [toast, setToast] = useState(null)
+  const toastTimerRef = useRef(null)
+  const showToast = useCallback((message, level = 'success') => {
+    setToast({ message, level })
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = setTimeout(() => setToast(null), 2500)
+  }, [])
   const [editingScheduleId, setEditingScheduleId] = useState(null)
   const [scheduledTasks, setScheduledTasks] = useState(() => loadSchedules())
   const [scheduleLogs, setScheduleLogs] = useState(() => loadScheduleLogs().slice(0, MAX_SCHEDULE_LOGS))
@@ -558,6 +603,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const timersRef = useRef(new Map())
   const taskRunLockRef = useRef(new Set())
   const runTaskRef = useRef(null)
+  const handleSyncSheetRef = useRef(null)
 
   const [postsFetchTick, setPostsFetchTick] = useState(0)
   const [cacheTick, setCacheTick] = useState(0)
@@ -657,6 +703,91 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     setScheduledTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'running', updatedAt: Date.now() } : t))
 
     const startedAt = Date.now()
+    const action = taskSnapshot.action || 'fetch_posts'
+
+    // Hard sync chạy 1 lần, kéo toàn bộ token mới nhất từ Google Sheet
+    // (không lặp theo account target như fetch_posts / refresh_token)
+    if (action === 'hard_sync') {
+      let ok = 0
+      let fail = 0
+      let runStatus = 'ok'
+      const failureDetails = []
+      try {
+        const summary = await (handleSyncSheetRef.current?.(true, { delaySec: taskSnapshot.delaySec }) ?? Promise.resolve(null))
+        ok = summary?.ok ?? 0
+        fail = summary?.failed ?? 0
+        runStatus = fail > 0 ? (ok > 0 ? 'partial' : 'fail') : 'ok'
+      } catch (err) {
+        fail = 1
+        runStatus = 'fail'
+        failureDetails.push({
+          accountId: null,
+          username: null,
+          token: null,
+          error: compactErrorMessage(err?.message || 'Hard sync thất bại'),
+        })
+      }
+
+      const endedAt = Date.now()
+      const durationSec = Math.round((endedAt - startedAt) / 1000)
+
+      let taskAfter = null
+      setScheduledTasks(prev => prev.map(t => {
+        if (t.id !== taskId) return t
+        const nextBase = {
+          ...t,
+          updatedAt: endedAt,
+          lastRunAt: endedAt,
+          runCount: (t.runCount || 0) + 1,
+          lastResult: { ok, fail, durationSec, status: runStatus },
+        }
+        if (t.status === 'cancelled') { taskAfter = nextBase; return nextBase }
+        if (t.mode === 'once') { taskAfter = { ...nextBase, status: 'completed', nextRunAt: null }; return taskAfter }
+        const intervalMs = t.intervalMs || 60 * 1000
+        let nextRunAt = endedAt + intervalMs
+        if (t.repeatUnit === 'day' && Number.isFinite(t.dailyHour) && Number.isFinite(t.dailyMinute) && Number.isFinite(t.dailySecond)) {
+          nextRunAt = t.nextRunAt || calcNextDailyRunAt(endedAt, t.everyValue || 1, t.dailyHour, t.dailyMinute, t.dailySecond)
+          while (nextRunAt <= endedAt) nextRunAt += intervalMs
+        }
+        taskAfter = { ...nextBase, status: 'active', nextRunAt }
+        return taskAfter
+      }))
+
+      appendScheduleLog({
+        at: endedAt,
+        taskId,
+        type: 'run',
+        action: 'hard_sync',
+        mode: taskSnapshot.mode === 'repeat' ? `repeat-${taskSnapshot.repeatUnit || 'minute'}` : 'once',
+        targetCount: ok + fail,
+        success: ok,
+        fail,
+        durationSec,
+        status: runStatus,
+        failures: failureDetails,
+        failHidden: 0,
+      })
+      appendAppLog({
+        at: endedAt,
+        level: fail > 0 ? 'warn' : 'info',
+        source: 'scheduler',
+        action: 'run',
+        message: `Scheduler ${scheduleActionLabel('hard_sync')} run ${runStatus}: ok ${ok} / fail ${fail}`,
+        meta: { taskId, schedulerAction: 'hard_sync', targetCount: ok + fail, durationSec, mode: taskSnapshot.mode, fail, failures: failureDetails, failHidden: 0 },
+      })
+
+      setPostsFetchTick(t => t + 1)
+      setCacheTick(t => t + 1)
+
+      if (taskAfter?.mode === 'repeat' && taskAfter.status === 'active' && taskAfter.nextRunAt) {
+        armTask(taskAfter)
+      } else {
+        clearTaskTimer(taskId)
+      }
+      taskRunLockRef.current.delete(taskId)
+      return
+    }
+
     const targets = accounts.filter(a => taskSnapshot.snapshotIds.includes(a.id))
     const DELAY = Math.max(1, Number(taskSnapshot.delaySec) || 5) * 1000
     let ok = 0
@@ -866,16 +997,20 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const createSchedule = useCallback(() => {
     setScheduleMsg('')
 
-    const snapshotIds = scheduleTargetType === 'all'
-      ? accounts.map(a => a.id)
-      : [...selectedIds]
+    const isHardSync = scheduleAction === 'hard_sync'
+    const snapshotIds = isHardSync
+      ? []
+      : scheduleTargetType === 'all'
+        ? accounts.map(a => a.id)
+        : [...selectedIds]
 
-    if (snapshotIds.length === 0) {
+    if (!isHardSync && snapshotIds.length === 0) {
       setScheduleMsg('Không có tài khoản để lên lịch')
       return
     }
 
     const now = Date.now()
+    const targetLabel = isHardSync ? 'Google Sheet' : `${snapshotIds.length} tài khoản`
     const delaySec = Math.max(1, Number(scheduleDelaySec) || 5)
     const repeatValue = Math.max(1, Number(scheduleEveryValue) || 1)
     const repeatUnit = ['minute', 'hour', 'day'].includes(scheduleRepeatUnit) ? scheduleRepeatUnit : 'minute'
@@ -937,8 +1072,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
         cancelReason: null,
       }
       setScheduleMsg(editingTask
-        ? `Đã cập nhật lịch 1 lần cho ${snapshotIds.length} tài khoản`
-        : `Đã tạo lịch 1 lần cho ${snapshotIds.length} tài khoản`)
+        ? `Đã cập nhật lịch 1 lần cho ${targetLabel}`
+        : `Đã tạo lịch 1 lần cho ${targetLabel}`)
     } else {
       const unitMs = repeatUnit === 'day' ? 24 * 60 * 60 * 1000 : repeatUnit === 'hour' ? 60 * 60 * 1000 : 60 * 1000
       const intervalMs = repeatValue * unitMs
@@ -972,8 +1107,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
         ? ` lúc ${String(dailyHour).padStart(2, '0')}:${String(dailyMinute).padStart(2, '0')}:${String(dailySecond).padStart(2, '0')}`
         : ''
       setScheduleMsg(editingTask
-        ? `Đã cập nhật lịch lặp mỗi ${repeatValue} ${label}${timeLabel} cho ${snapshotIds.length} tài khoản`
-        : `Đã tạo lịch lặp mỗi ${repeatValue} ${label}${timeLabel} cho ${snapshotIds.length} tài khoản`)
+        ? `Đã cập nhật lịch lặp mỗi ${repeatValue} ${label}${timeLabel} cho ${targetLabel}`
+        : `Đã tạo lịch lặp mỗi ${repeatValue} ${label}${timeLabel} cho ${targetLabel}`)
     }
 
     if (editingTask) {
@@ -1170,6 +1305,112 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     setConfirmDelete({ type: 'bulk', ids: [...selectedIds], label: names, count: selectedIds.size })
   }
 
+  const exportSelected = useCallback((format = 'csv') => {
+    const targets = accounts.filter(a => selectedIds.has(a.id))
+    if (targets.length === 0) return
+
+    const ts = new Date()
+    const pad = (n) => String(n).padStart(2, '0')
+    const stamp = `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}`
+
+    let blob, filename
+    if (format === 'json') {
+      const data = targets.map(a => ({
+        id: a.id,
+        username: a.username || '',
+        name: a.name || '',
+        token: a.token || '',
+        status: a.status || '',
+        bio: a.bio || '',
+        profileUrl: a.username ? `https://www.threads.com/@${a.username}` : '',
+        error: a.error || '',
+      }))
+      blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' })
+      filename = `threads-accounts_${stamp}.json`
+    } else {
+      const esc = (v) => {
+        const s = String(v ?? '')
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+      }
+      const header = ['id', 'username', 'name', 'token', 'status', 'profile_url', 'bio']
+      const rows = targets.map(a => [
+        a.id,
+        a.username || '',
+        a.name || '',
+        a.token || '',
+        a.status || '',
+        a.username ? `https://www.threads.com/@${a.username}` : '',
+        a.bio || '',
+      ].map(esc).join(','))
+      const csv = '﻿' + [header.join(','), ...rows].join('\r\n')
+      blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+      filename = `threads-accounts_${stamp}.csv`
+    }
+
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+
+    appendAppLog({
+      level: 'info',
+      source: 'account',
+      action: 'export',
+      message: `Đã xuất ${targets.length} tài khoản ra file ${format.toUpperCase()}`,
+      meta: { count: targets.length, format },
+    })
+    showToast(`Đã xuất ${targets.length} tài khoản ra file ${format.toUpperCase()}`)
+  }, [accounts, selectedIds, appendAppLog, showToast])
+
+  const copySelected = useCallback(async (fields) => {
+    const targets = accounts.filter(a => selectedIds.has(a.id))
+    if (targets.length === 0) return
+    const cols = Array.isArray(fields) && fields.length > 0 ? fields : ['username']
+
+    const valueOf = (a, field) => {
+      switch (field) {
+        case 'id': return a.id || ''
+        case 'username': return a.username || ''
+        case 'name': return a.name || ''
+        case 'token': return a.token || ''
+        case 'status': return a.status || ''
+        case 'profile_url': return a.username ? `https://www.threads.com/@${a.username}` : ''
+        case 'bio': return a.bio || ''
+        default: return ''
+      }
+    }
+
+    const lines = targets.map(a => cols.map(f => valueOf(a, f)).join('\t'))
+    const text = lines.join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      appendAppLog({
+        level: 'info',
+        source: 'account',
+        action: 'copy_bulk',
+        message: `Đã copy ${targets.length} tài khoản (${cols.join(', ')})`,
+        meta: { count: targets.length, fields: cols },
+      })
+      showToast(`Đã copy ${targets.length} tài khoản vào clipboard`)
+    } catch (err) {
+      showToast('Copy thất bại: ' + (err?.message || ''), 'error')
+    }
+  }, [accounts, selectedIds, appendAppLog, showToast])
+
+  const copyOne = useCallback(async (field, value, successMsg) => {
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+      showToast(successMsg || 'Đã copy vào clipboard')
+    } catch (err) {
+      showToast('Copy thất bại: ' + (err?.message || ''), 'error')
+    }
+  }, [showToast])
+
   useEffect(() => { saveAccounts(accounts) }, [accounts])
   useEffect(() => { saveSettings(settings) }, [settings])
 
@@ -1179,6 +1420,32 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const [followersMax, setFollowersMax] = useState(homeViewState.followersMax)
   const [page, setPage] = useState(homeViewState.page)
   const [perPage, setPerPage] = useState(() => Number(localStorage.getItem('td.perPage')) || 20)
+  const [viewMode, setViewMode] = useState(() => localStorage.getItem('td.viewMode') === 'list' ? 'list' : 'grid')
+  const [copyMenuOpen, setCopyMenuOpen] = useState(false)
+  const [copyFields, setCopyFields] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('td.copyFields') || 'null')
+      if (Array.isArray(saved) && saved.length > 0) return saved
+    } catch {}
+    return ['username']
+  })
+  const copyMenuRef = useRef(null)
+  useEffect(() => {
+    if (!copyMenuOpen) return
+    const onDown = (e) => { if (copyMenuRef.current && !copyMenuRef.current.contains(e.target)) setCopyMenuOpen(false) }
+    const onEsc = (e) => { if (e.key === 'Escape') setCopyMenuOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    window.addEventListener('keydown', onEsc)
+    return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onEsc) }
+  }, [copyMenuOpen])
+  const toggleCopyField = useCallback((field) => {
+    setCopyFields(prev => {
+      const next = prev.includes(field) ? prev.filter(f => f !== field) : [...prev, field]
+      const safe = next.length > 0 ? next : ['username']
+      localStorage.setItem('td.copyFields', JSON.stringify(safe))
+      return safe
+    })
+  }, [])
 
   useEffect(() => {
     homeViewState.statusFilter = statusFilter
@@ -1253,10 +1520,14 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   const insightsTTL = (settings?.cacheTTLInsights ?? 30) * 60 * 1000 || 30 * 60 * 1000
 
   const filtered = useMemo(() => {
+    const tokens = parseSearchTokens(query)
     let result = accountsWithTokenCheck.filter(a => {
-      const q = query.toLowerCase()
-      const matchQuery = !q || (a.username || '').toLowerCase().includes(q) || (a.name || '').toLowerCase().includes(q)
-      if (!matchQuery) return false
+      if (tokens.length > 0) {
+        const u = (a.username || '').toLowerCase()
+        const n = (a.name || '').toLowerCase()
+        const matchAny = tokens.some(t => u.includes(t) || n.includes(t))
+        if (!matchAny) return false
+      }
       if (statusFilter === 'abnormal') return accountHealthMap[a.id] === 'abnormal'
       if (statusFilter === 'normal') return accountHealthMap[a.id] === 'normal' && a.status !== 'error' && a.status !== 'locked' && a.status !== 'blocked'
       if (statusFilter === 'ok') return a.status === 'ok'
@@ -1553,7 +1824,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     })
   }, [accounts, bulkLookupText])
 
-  const runBulkImportTokens = useCallback(async (tokens, { mode = 'import', clearPrevious = true } = {}) => {
+  const runBulkImportTokens = useCallback(async (tokens, { mode = 'import', clearPrevious = true, delaySec = null } = {}) => {
     if (!Array.isArray(tokens) || tokens.length === 0) return
 
     appendAppLog({
@@ -1575,7 +1846,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     setBulkProgress({ done: 0, total: tokens.length })
     bulkAbort.current = false
 
-    const DELAY = (settings?.bulkDelay ?? 5) * 1000
+    const DELAY = (delaySec != null ? Math.max(1, Number(delaySec) || 5) : (settings?.bulkDelay ?? 5)) * 1000
     const nextFailed = []
 
     for (let i = 0; i < tokens.length; i++) {
@@ -1608,10 +1879,13 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
         }
         setAccounts(prev => {
           const normUser = normalizeUsername(info.username)
-          const isConflict = (a) =>
-            (normUser && normalizeUsername(a.username) === normUser) ||
-            (info.id && a.id === info.id) ||
-            (a.token === t)
+          const isConflict = (a) => {
+            if (normUser && normalizeUsername(a.username) === normUser) return true
+            // Fallback: match theo token chỉ khi account cũ KHÔNG có username
+            // (tránh ghi đè nhầm khi 2 account có cùng token tạm thời)
+            if (!normalizeUsername(a.username) && a.token === t) return true
+            return false
+          }
 
           const conflicting = prev.filter(isConflict)
           if (conflicting.length === 0) {
@@ -1686,6 +1960,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     })
     setBulkRunning(false)
     if (mode === 'sync_sheet') setSyncRunning(false)
+    return { total: tokens.length, failed: nextFailed.length, ok: tokens.length - nextFailed.length }
   }, [appendAppLog, settings])
 
   const handleBulkImport = useCallback(async () => {
@@ -1726,7 +2001,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
     })
   }, [bulkFailed, bulkRunning, retryFailedBulkImport])
 
-  const handleSyncSheet = useCallback(async (hard = false) => {
+  const handleSyncSheet = useCallback(async (hard = false, { delaySec = null } = {}) => {
     appendAppLog({
       level: 'info',
       source: 'sync_sheet',
@@ -1752,13 +2027,10 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       skippedLive = 0
     } else {
       const liveAccounts = accounts.filter(a => a.status === 'ok')
-      const liveIds = new Set(liveAccounts.map(a => String(a.id || '').trim()).filter(Boolean))
       const liveUsernames = new Set(liveAccounts.map(a => normalizeUsername(a.username)).filter(Boolean))
 
       syncEntries = sheetEntries.filter(e => {
-        const id = String(e.id || '').trim()
         const uname = normalizeUsername(e.username)
-        if (id && liveIds.has(id)) return false
         if (uname && liveUsernames.has(uname)) return false
         return true
       })
@@ -1787,11 +2059,16 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
         message: hard ? '[API] Sheet không có token nào để sync' : '[API] Không có token nào cần sync (tất cả account đã live)',
         meta: { sheetTotal: sheetEntries.length, skippedLive },
       })
-      return
+      return { sheetTotal: sheetEntries.length, skippedLive, syncTargets: 0, ok: 0, failed: 0, hard }
     }
 
-    await runBulkImportTokens(syncTokens, { mode: 'sync_sheet', clearPrevious: true })
+    const res = await runBulkImportTokens(syncTokens, { mode: 'sync_sheet', clearPrevious: true, delaySec })
+    return { sheetTotal: sheetEntries.length, skippedLive, syncTargets: syncTokens.length, ok: res?.ok ?? 0, failed: res?.failed ?? 0, hard }
   }, [accounts, appendAppLog, runBulkImportTokens, settings])
+
+  useEffect(() => {
+    handleSyncSheetRef.current = handleSyncSheet
+  }, [handleSyncSheet])
 
   const confirmSyncSheet = useCallback((hard = false) => {
     if (bulkRunning || syncRunning) return
@@ -1978,25 +2255,25 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
           <>
         <section className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-4">
           <button onClick={() => setStatusFilter('all')} className="text-left">
-            <StatCard label="Tổng" value={stats.total} tone="text-neutral-700 dark:text-neutral-200" icon={<User className="w-4 h-4" />} />
+            <StatCard label="Tổng" value={stats.total} accent="neutral" active={statusFilter === 'all'} icon={<User className="w-4 h-4" />} />
           </button>
           <button onClick={() => setStatusFilter(f => f === 'ok' ? 'all' : 'ok')} className="text-left">
-            <StatCard label="Hoạt động" value={stats.ok} tone={`text-emerald-400 ${statusFilter === 'ok' ? 'ring-2 ring-emerald-500 rounded-2xl' : ''}`} icon={<CheckCircle2 className="w-4 h-4" />} />
+            <StatCard label="Hoạt động" value={stats.ok} accent="emerald" active={statusFilter === 'ok'} icon={<CheckCircle2 className="w-4 h-4" />} />
           </button>
           <button onClick={() => setStatusFilter(f => f === 'error' ? 'all' : 'error')} className="text-left">
-            <StatCard label="Token die" value={stats.err} tone={`text-rose-400 ${statusFilter === 'error' ? 'ring-2 ring-rose-500 rounded-2xl' : ''}`} icon={<AlertTriangle className="w-4 h-4" />} />
+            <StatCard label="Token die" value={stats.err} accent="rose" active={statusFilter === 'error'} icon={<AlertTriangle className="w-4 h-4" />} />
           </button>
           <button onClick={() => setStatusFilter(f => f === 'locked' ? 'all' : 'locked')} className="text-left">
-            <StatCard label="Bị khoá" value={stats.locked} tone={`text-orange-400 ${statusFilter === 'locked' ? 'ring-2 ring-orange-500 rounded-2xl' : ''}`} icon={<Lock className="w-4 h-4" />} />
+            <StatCard label="Bị khoá" value={stats.locked} accent="orange" active={statusFilter === 'locked'} icon={<Lock className="w-4 h-4" />} />
           </button>
           <button onClick={() => setStatusFilter(f => f === 'blocked' ? 'all' : 'blocked')} className="text-left">
-            <StatCard label="Bị block" value={stats.blocked} tone={`text-amber-400 ${statusFilter === 'blocked' ? 'ring-2 ring-amber-500 rounded-2xl' : ''}`} icon={<AlertTriangle className="w-4 h-4" />} />
+            <StatCard label="Bị block" value={stats.blocked} accent="amber" active={statusFilter === 'blocked'} icon={<AlertTriangle className="w-4 h-4" />} />
           </button>
           <button onClick={() => setStatusFilter(f => f === 'normal' ? 'all' : 'normal')} className="text-left">
-            <StatCard label="Bình thường" value={stats.normal} tone={`text-emerald-500 ${statusFilter === 'normal' ? 'ring-2 ring-emerald-500 rounded-2xl' : ''}`} icon={<CheckCircle2 className="w-4 h-4" />} />
+            <StatCard label="Bình thường" value={stats.normal} accent="emerald" active={statusFilter === 'normal'} icon={<CheckCircle2 className="w-4 h-4" />} />
           </button>
           <button onClick={() => setStatusFilter(f => f === 'abnormal' ? 'all' : 'abnormal')} className="text-left">
-            <StatCard label="Bất thường" value={stats.abnormal} tone={`text-rose-500 ${statusFilter === 'abnormal' ? 'ring-2 ring-rose-500 rounded-2xl' : ''}`} icon={<AlertTriangle className="w-4 h-4" />} />
+            <StatCard label="Bất thường" value={stats.abnormal} accent="rose" active={statusFilter === 'abnormal'} icon={<AlertTriangle className="w-4 h-4" />} />
           </button>
         </section>
 
@@ -2203,6 +2480,22 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                   ? <><CheckSquare className="w-3.5 h-3.5" /> Bỏ chọn</>
                   : <><Square className="w-3.5 h-3.5" /> Chọn tất cả</>}
               </button>
+              <div className="inline-flex rounded-lg border border-neutral-200 dark:border-neutral-800 overflow-hidden">
+                <button
+                  onClick={() => { setViewMode('grid'); localStorage.setItem('td.viewMode', 'grid') }}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs ${viewMode === 'grid' ? 'bg-indigo-500/20 text-indigo-300' : 'hover:bg-neutral-200 dark:hover:bg-neutral-800 text-neutral-400'}`}
+                  title="Dạng lưới"
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => { setViewMode('list'); localStorage.setItem('td.viewMode', 'list') }}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs border-l border-neutral-200 dark:border-neutral-800 ${viewMode === 'list' ? 'bg-indigo-500/20 text-indigo-300' : 'hover:bg-neutral-200 dark:hover:bg-neutral-800 text-neutral-400'}`}
+                  title="Dạng danh sách"
+                >
+                  <Rows3 className="w-3.5 h-3.5" />
+                </button>
+              </div>
               <button
                 onClick={confirmRefreshAll}
                 disabled={refreshingAll || accounts.length === 0}
@@ -2213,14 +2506,32 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                 {refreshingAll ? 'Đang refresh...' : 'Refresh All'}
               </button>
               <div className="relative">
-                {resolvingUrl ? <RefreshCw className="w-4 h-4 text-indigo-400 animate-spin absolute left-3 top-1/2 -translate-y-1/2" /> : <Search className="w-4 h-4 text-neutral-400 dark:text-neutral-500 absolute left-3 top-1/2 -translate-y-1/2" />}
-                <input
+                {resolvingUrl ? <RefreshCw className="w-4 h-4 text-indigo-400 animate-spin absolute left-3 top-2.5" /> : <Search className="w-4 h-4 text-neutral-400 dark:text-neutral-500 absolute left-3 top-2.5" />}
+                <textarea
                   value={query}
                   onChange={handleQueryChange}
                   disabled={resolvingUrl}
-                  placeholder="Tìm username / tên / paste URL Threads..."
-                  className="pl-9 pr-3 py-2 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 focus:border-indigo-500 outline-none text-sm disabled:opacity-50"
+                  rows={Math.min(5, Math.max(1, query.split('\n').length))}
+                  placeholder="Tìm username / tên / URL — nhiều từ khoá: mỗi dòng 1 từ hoặc cách bằng dấu phẩy"
+                  className="pl-9 pr-16 py-2 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 focus:border-indigo-500 outline-none text-sm disabled:opacity-50 resize-none w-72 font-sans leading-5"
                 />
+                {(() => {
+                  const toks = parseSearchTokens(query)
+                  if (toks.length === 0) return null
+                  return (
+                    <div className="absolute right-2 top-2 flex items-center gap-1">
+                      <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 text-[10px] font-medium">{toks.length} từ khoá</span>
+                      <button
+                        type="button"
+                        onClick={() => { setQuery(''); setUrlMsg('') }}
+                        className="p-0.5 rounded hover:bg-neutral-200 dark:hover:bg-neutral-800 text-neutral-400"
+                        title="Xoá tìm kiếm"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )
+                })()}
               </div>
               {urlMsg && <span className="text-xs text-amber-400">{urlMsg}</span>}
             </div>
@@ -2264,6 +2575,55 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                   <X className="w-3.5 h-3.5" /> Dừng
                 </button>
               )}
+              <div className="relative" ref={copyMenuRef}>
+                <button
+                  onClick={() => setCopyMenuOpen(v => !v)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-800 text-xs"
+                  title="Copy thông tin tài khoản đã chọn vào clipboard"
+                >
+                  <ClipboardCopy className="w-3.5 h-3.5" /> Copy <ChevronDown className="w-3.5 h-3.5" />
+                </button>
+                {copyMenuOpen && (
+                  <div className="absolute right-0 mt-1 z-50 w-52 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-lg p-2">
+                    <div className="text-[11px] text-neutral-400 px-1 pb-1">Chọn thông tin copy</div>
+                    {[
+                      { f: 'username', label: 'Username' },
+                      { f: 'id', label: 'ID' },
+                      { f: 'name', label: 'Tên' },
+                      { f: 'token', label: 'Token' },
+                      { f: 'status', label: 'Trạng thái' },
+                      { f: 'profile_url', label: 'URL profile' },
+                      { f: 'bio', label: 'Bio' },
+                    ].map(({ f, label }) => (
+                      <label key={f} className="flex items-center gap-2 text-xs px-1.5 py-1 rounded hover:bg-neutral-100 dark:hover:bg-neutral-800 cursor-pointer">
+                        <input type="checkbox" checked={copyFields.includes(f)} onChange={() => toggleCopyField(f)} className="w-3.5 h-3.5" />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                    <button
+                      onClick={() => { setCopyMenuOpen(false); copySelected(copyFields) }}
+                      className="mt-1 w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-medium"
+                    >
+                      <ClipboardCopy className="w-3.5 h-3.5" /> Copy {selectedIds.size} tài khoản
+                    </button>
+                    <div className="text-[10px] text-neutral-400 dark:text-neutral-500 mt-1 px-1">Nhiều cột cách nhau bằng Tab, mỗi tài khoản 1 dòng.</div>
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => exportSelected('csv')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-800 text-xs"
+                title="Xuất tài khoản đã chọn ra file CSV"
+              >
+                <FileDown className="w-3.5 h-3.5" /> Export CSV
+              </button>
+              <button
+                onClick={() => exportSelected('json')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-800 text-xs"
+                title="Xuất tài khoản đã chọn ra file JSON"
+              >
+                <FileDown className="w-3.5 h-3.5" /> Export JSON
+              </button>
               <button
                 onClick={removeSelected}
                 disabled={fetchingAllPosts}
@@ -2388,6 +2748,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                   >
                     <option value="fetch_posts">Fetch posts</option>
                     <option value="refresh_token">Refresh token</option>
+                    <option value="hard_sync">Hard Sync (Google Sheet)</option>
                   </select>
                 </label>
 
@@ -2471,21 +2832,29 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                   </div>
                 )}
 
-                <label className="text-xs text-neutral-400">
-                  Target
-                  <select
-                    value={scheduleTargetType}
-                    onChange={(e) => setScheduleTargetType(e.target.value)}
-                    className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
-                  >
-                    <option value="selected">Selected</option>
-                    <option value="all">All</option>
-                  </select>
-                </label>
-
-                {showScheduleDelay && (
+                {scheduleAction === 'hard_sync' ? (
+                  <div className="text-xs text-neutral-400 md:col-span-1 flex items-end">
+                    <span className="px-2 py-1.5 rounded-lg border border-indigo-500/30 bg-indigo-500/5 text-indigo-300 w-full">
+                      Hard Sync kéo toàn bộ token từ Google Sheet (không cần chọn tài khoản)
+                    </span>
+                  </div>
+                ) : (
                   <label className="text-xs text-neutral-400">
-                    Delay riêng (giây)
+                    Target
+                    <select
+                      value={scheduleTargetType}
+                      onChange={(e) => setScheduleTargetType(e.target.value)}
+                      className="mt-1 w-full px-2 py-1.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs outline-none"
+                    >
+                      <option value="selected">Selected</option>
+                      <option value="all">All</option>
+                    </select>
+                  </label>
+                )}
+
+                {(scheduleAction === 'hard_sync' || showScheduleDelay) && (
+                  <label className="text-xs text-neutral-400">
+                    {scheduleAction === 'hard_sync' ? 'Delay giữa mỗi token (giây)' : 'Delay riêng (giây)'}
                     <input
                       type="number"
                       min="1"
@@ -2498,7 +2867,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                 )}
               </div>
 
-              {scheduleTargetType === 'selected' && (
+              {scheduleAction !== 'hard_sync' && scheduleTargetType === 'selected' && (
                 <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-3 space-y-2">
                   <div className="flex items-center justify-between">
                     <div className="text-xs text-neutral-400">Chọn tài khoản chạy lịch ({selectedIds.size}/{accounts.length})</div>
@@ -2573,8 +2942,14 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
                               ? '1 lần'
                               : `Lặp mỗi ${task.everyValue} ${task.repeatUnit === 'day' ? 'ngày' : task.repeatUnit === 'hour' ? 'giờ' : 'phút'}${task.repeatUnit === 'day' && Number.isFinite(task.dailyHour) && Number.isFinite(task.dailyMinute) && Number.isFinite(task.dailySecond) ? ` lúc ${String(task.dailyHour).padStart(2, '0')}:${String(task.dailyMinute).padStart(2, '0')}:${String(task.dailySecond).padStart(2, '0')}` : ''}`}</span>
                             {' · '}action <strong>{scheduleActionLabel(task.action || 'fetch_posts')}</strong>
-                            {' · '}target <strong>{task.targetType === 'all' ? 'All' : 'Selected'}</strong>
-                            {' · '}snapshot <strong>{task.snapshotIds?.length || 0}</strong>
+                            {task.action === 'hard_sync' ? (
+                              <>{' · '}nguồn <strong>Google Sheet</strong></>
+                            ) : (
+                              <>
+                                {' · '}target <strong>{task.targetType === 'all' ? 'All' : 'Selected'}</strong>
+                                {' · '}snapshot <strong>{task.snapshotIds?.length || 0}</strong>
+                              </>
+                            )}
                           </div>
                           <div className="flex items-center gap-1">
                             {task.status !== 'running' && task.status !== 'cancelled' && (
@@ -2669,7 +3044,7 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
             </div>
           )}
 
-          {path !== '/scheduler' && path !== '/logs' && (
+          {path !== '/scheduler' && path !== '/logs' && viewMode === 'grid' && (
             <div className="grid md:grid-cols-2 gap-3">
               {paged.map(a => (
                 <AccountCard
@@ -2694,6 +3069,30 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
               ))}
               {filtered.length === 0 && (
                 <div className="md:col-span-2 text-center text-sm text-neutral-400 dark:text-neutral-500 py-10 border border-dashed border-neutral-300 dark:border-neutral-800 rounded-xl">
+                  Chưa có tài khoản nào. Thêm token ở trên để bắt đầu.
+                </div>
+              )}
+            </div>
+          )}
+
+          {path !== '/scheduler' && path !== '/logs' && viewMode === 'list' && (
+            <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 overflow-hidden divide-y divide-neutral-200 dark:divide-neutral-800">
+              {paged.map(a => (
+                <AccountListRow
+                  key={a.id}
+                  account={a}
+                  settings={settings}
+                  selected={selectedIds.has(a.id)}
+                  onToggleSelect={() => toggleSelect(a.id)}
+                  onOpen={(id) => navigate('/' + id)}
+                  onRefresh={refreshOne}
+                  onRemove={remove}
+                  onCopy={copyOne}
+                  fetchTick={postsFetchTick}
+                />
+              ))}
+              {filtered.length === 0 && (
+                <div className="text-center text-sm text-neutral-400 dark:text-neutral-500 py-10">
                   Chưa có tài khoản nào. Thêm token ở trên để bắt đầu.
                 </div>
               )}
@@ -2733,14 +3132,60 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
 
       <footer className="max-w-6xl mx-auto px-6 py-6 text-xs text-neutral-400 dark:text-neutral-600 flex items-center justify-between">
         <span>Threads Doctor v{APP_VERSION} · {new Date().getFullYear()}</span>
-        <button
-          onClick={() => { if (window.electronAPI?.restartApp) { window.electronAPI.restartApp() } else { window.location.reload() } }}
-          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-800 text-xs"
-          title="Restart app để áp dụng bản cập nhật mới"
-        >
-          <RefreshCw className="w-3 h-3" /> Cập nhật
-        </button>
+        {(() => {
+          const state = updateStatus?.state ?? 'idle'
+          const canInstall = state === 'downloaded'
+          const isBusy = state === 'checking' || state === 'downloading' || updateBusy
+          const labelMap = {
+            idle: 'Kiểm tra cập nhật',
+            checking: 'Đang kiểm tra…',
+            available: 'Có bản mới, đang tải…',
+            downloading: `Đang tải… ${updateStatus?.percent ?? 0}%`,
+            downloaded: 'Cài đặt & khởi động lại',
+            none: 'Đang ở bản mới nhất',
+            error: 'Thử lại kiểm tra',
+          }
+          return (
+            <div className="flex flex-col items-end gap-1">
+              <button
+                onClick={canInstall ? handleInstallUpdate : handleCheckUpdate}
+                disabled={isBusy}
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-xs disabled:opacity-60 ${
+                  canInstall
+                    ? 'bg-emerald-500 text-white border-emerald-400 hover:bg-emerald-600'
+                    : 'border-neutral-200 dark:border-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-800'
+                }`}
+                title="Kiểm tra & cài bản cập nhật mới từ GitHub"
+              >
+                {isBusy
+                  ? <RefreshCw className="w-3 h-3 animate-spin" />
+                  : canInstall
+                    ? <Download className="w-3 h-3" />
+                    : <RefreshCw className="w-3 h-3" />}
+                {labelMap[state] ?? 'Kiểm tra cập nhật'}
+              </button>
+              {state === 'error' && (
+                <span className="text-rose-500 max-w-[240px] truncate" title={updateStatus?.error || ''}>
+                  {updateStatus?.error || 'Lỗi không xác định'}
+                </span>
+              )}
+            </div>
+          )
+        })()}
       </footer>
+
+      {toast && (
+        <div className="fixed bottom-5 right-5 z-[60] pointer-events-none">
+          <div className={`pointer-events-auto inline-flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-lg text-sm border ${
+            toast.level === 'error'
+              ? 'bg-rose-500 text-white border-rose-400'
+              : 'bg-emerald-500 text-white border-emerald-400'
+          }`}>
+            {toast.level === 'error' ? <AlertTriangle className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4" />}
+            <span>{toast.message}</span>
+          </div>
+        </div>
+      )}
 
       {confirmBulkAction && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setConfirmBulkAction(null)}>
@@ -2810,10 +3255,56 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   )
 }
 
-function StatCard({ icon, label, value, tone }) {
+const STATCARD_ACCENTS = {
+  neutral: {
+    text: 'text-neutral-700 dark:text-neutral-200',
+    bar: 'bg-neutral-500',
+    activeBg: 'bg-neutral-100 dark:bg-neutral-800/60',
+    activeBorder: 'border-neutral-400 dark:border-neutral-500',
+    activeShadow: 'shadow-md shadow-neutral-500/10',
+  },
+  emerald: {
+    text: 'text-emerald-500',
+    bar: 'bg-emerald-500',
+    activeBg: 'bg-emerald-50 dark:bg-emerald-500/10',
+    activeBorder: 'border-emerald-400 dark:border-emerald-500/60',
+    activeShadow: 'shadow-md shadow-emerald-500/15',
+  },
+  rose: {
+    text: 'text-rose-500',
+    bar: 'bg-rose-500',
+    activeBg: 'bg-rose-50 dark:bg-rose-500/10',
+    activeBorder: 'border-rose-400 dark:border-rose-500/60',
+    activeShadow: 'shadow-md shadow-rose-500/15',
+  },
+  orange: {
+    text: 'text-orange-500',
+    bar: 'bg-orange-500',
+    activeBg: 'bg-orange-50 dark:bg-orange-500/10',
+    activeBorder: 'border-orange-400 dark:border-orange-500/60',
+    activeShadow: 'shadow-md shadow-orange-500/15',
+  },
+  amber: {
+    text: 'text-amber-500',
+    bar: 'bg-amber-500',
+    activeBg: 'bg-amber-50 dark:bg-amber-500/10',
+    activeBorder: 'border-amber-400 dark:border-amber-500/60',
+    activeShadow: 'shadow-md shadow-amber-500/15',
+  },
+}
+
+function StatCard({ icon, label, value, accent = 'neutral', active = false }) {
+  const a = STATCARD_ACCENTS[accent] || STATCARD_ACCENTS.neutral
   return (
-    <div className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900/50 p-4">
-      <div className={`flex items-center gap-2 ${tone}`}>{icon}<span className="text-xs">{label}</span></div>
+    <div
+      className={`relative rounded-2xl border p-4 transition-all duration-200 ${
+        active
+          ? `${a.activeBg} ${a.activeBorder} ${a.activeShadow} -translate-y-0.5`
+          : 'border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900/50 hover:border-neutral-300 dark:hover:border-neutral-700 hover:-translate-y-0.5'
+      }`}
+    >
+      {active && <span className={`absolute left-0 top-3 bottom-3 w-1 rounded-full ${a.bar}`} />}
+      <div className={`flex items-center gap-2 ${a.text}`}>{icon}<span className="text-xs font-medium">{label}</span></div>
       <div className="mt-2 text-2xl font-semibold">{value}</div>
     </div>
   )
@@ -3455,6 +3946,95 @@ function formatNum(n) {
   return String(n)
 }
 
+function AccountListRow({ account, settings, selected, onToggleSelect, onRefresh, onRemove, onOpen, onCopy, fetchTick = 0 }) {
+  const a = account
+  const loading = a.status === 'loading'
+  const locked = isAccountLocked(a)
+  const dead = isTokenDead(a)
+  const blocked = isTokenBlocked(a)
+  const isErr = a.status === 'error' || a.status === 'locked' || a.status === 'blocked'
+
+  const cached = cacheGet(`posts:${a.id}:10`, resolveTtlMs(settings, ['cacheTTLPosts', 'cacheTTLPost', 'cacheTTLReplies'], 30))
+  const [lastPostTime, setLastPostTime] = useState(() => (cached && cached.length > 0 ? cached[0].timestamp || null : undefined))
+
+  useEffect(() => {
+    if (fetchTick === 0) return
+    const fresh = cacheGet(`posts:${a.id}:10`, resolveTtlMs(settings, ['cacheTTLPosts', 'cacheTTLPost', 'cacheTTLReplies'], 30))
+    if (fresh && fresh.length > 0) setLastPostTime(fresh[0].timestamp || null)
+    else if (fresh) setLastPostTime(null)
+  }, [fetchTick])
+
+  const statusLabel = locked ? 'Bị khoá' : dead ? 'Token die' : blocked ? 'Bị block' : a.status === 'ok' ? 'OK' : (a.status || '—')
+  const statusTone = isErr ? 'text-rose-500 bg-rose-100 dark:bg-rose-500/15' : 'text-emerald-600 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-500/15'
+
+  return (
+    <div className={`flex items-center gap-3 px-3 py-2 border-b border-neutral-200 dark:border-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-900/40 ${selected ? 'bg-indigo-50 dark:bg-indigo-500/5' : ''}`}>
+      <input type="checkbox" checked={selected} onChange={onToggleSelect} className="w-4 h-4 shrink-0" />
+      <div className="w-8 h-8 rounded-full bg-neutral-200 dark:bg-neutral-800 overflow-hidden shrink-0">
+        {a.avatar && <img src={a.avatar} alt="" className="w-full h-full object-cover" />}
+      </div>
+      <button onClick={() => onOpen(a.id)} className="flex-1 min-w-0 text-left">
+        <div className="flex items-center gap-2">
+          <span className="font-medium text-sm truncate hover:text-indigo-400">@{a.username || a.id}</span>
+          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 ${statusTone}`}>{statusLabel}</span>
+        </div>
+        {a.name && <div className="text-xs text-neutral-400 dark:text-neutral-500 truncate">{a.name}</div>}
+      </button>
+      <div className="hidden md:block text-[11px] text-neutral-400 dark:text-neutral-500 shrink-0 w-32 text-right">
+        {lastPostTime === undefined ? '— chưa lấy' : lastPostTime === null ? 'Không có post' : `Post: ${new Date(lastPostTime).toLocaleDateString()}`}
+      </div>
+      <div className="flex items-center gap-1 shrink-0">
+        <button
+          onClick={() => onCopy?.('username', a.username || '', `Đã copy @${a.username || a.id}`)}
+          disabled={!a.username}
+          className="p-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-40"
+          title="Copy username"
+        >
+          <User className="w-3.5 h-3.5" />
+        </button>
+        <button
+          onClick={() => onCopy?.('token', a.token || '', 'Đã copy token')}
+          disabled={!a.token}
+          className="p-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-40"
+          title="Copy token"
+        >
+          <KeyRound className="w-3.5 h-3.5" />
+        </button>
+        <button
+          onClick={() => onCopy?.('profile_url', a.username ? `https://www.threads.com/@${a.username}` : '', 'Đã copy link profile')}
+          disabled={!a.username}
+          className="p-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-40"
+          title="Copy link profile"
+        >
+          <ClipboardCopy className="w-3.5 h-3.5" />
+        </button>
+        <button
+          onClick={() => onRefresh(a.id)}
+          disabled={loading}
+          className="p-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50"
+          title="Refresh token"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+        </button>
+        <button
+          onClick={() => onOpen(a.id)}
+          className="p-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+          title="Xem chi tiết"
+        >
+          <ExternalLink className="w-3.5 h-3.5" />
+        </button>
+        <button
+          onClick={() => onRemove(a.id)}
+          className="p-1.5 rounded-lg border border-rose-800 text-rose-400 hover:bg-rose-500/10"
+          title="Xóa"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, onRemove, onOpen, onAddFavWorker, onBuffMe, buffFavWorkers = [], onActionLog, duplicateCaptions = [], fetchTick = 0, followersBaseline = {}, setFollowersBaseline, onCacheChange }) {
   const a = account
   const loading = a.status === 'loading'
@@ -3663,7 +4243,11 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
             )}
           </div>
 
-          {a.status === 'error' && <div className="mt-1 text-[11px] text-rose-400 font-mono">Token die: {a.error}</div>}
+          {a.status === 'error' && (
+            <div className="mt-1 text-[11px] text-rose-400 font-medium truncate" title={a.error || 'Token die'}>
+              Token die
+            </div>
+          )}
 
           {duplicateCaptions.length > 0 && (
             <div className="mt-2 text-[12px] text-rose-600 dark:text-rose-400 font-semibold flex items-center gap-1">
@@ -4205,6 +4789,14 @@ function PostDetailView({ account, postId, settings, navigate, onActionLog }) {
     if (cachedPost) {
       setPost(cachedPost)
       onActionLog?.({ level: 'info', source: 'post_detail', action: 'load_post_cache', message: `[Cache] Đọc post từ cache ${postId}`, meta: { accountId: account.id, postId } })
+    } else {
+      const postsTtl = resolveTtlMs(settings, ['cacheTTLPosts', 'cacheTTL'], 30)
+      const cachedList = cacheGet(`posts:${account.id}:10`, postsTtl)
+      const fromList = Array.isArray(cachedList) ? cachedList.find(p => String(p?.id) === String(postId)) : null
+      if (fromList) {
+        setPost(fromList)
+        onActionLog?.({ level: 'info', source: 'post_detail', action: 'load_post_from_list_cache', message: `[Cache] Đọc post từ cache danh sách ${postId}`, meta: { accountId: account.id, postId } })
+      }
     }
 
     const cachedPI = cacheGet(`post_insights:${postId}`, insightsTtl)

@@ -1,7 +1,16 @@
+# Dependencies
 node_modules
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build output
 dist
 release
-.DS_Store
+out
+*.tsbuildinfo
+
+# Secrets - KHÔNG commit
 .env
 .env.local
 .env.*
@@ -11,4 +20,17 @@ release
 *.p12
 *.pfx
 secrets.*
+
+# Claude Code (settings local có thể chứa token/credential đã được cache) — KHÔNG BAO GIỜ commit
+.claude/
+
+# Tạm / scratch
+tmp/
+*.tmp
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
 *.log

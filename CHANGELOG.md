@@ -1,5 +1,28 @@
 # Changelog — Threads Doctor
 
+## v0.15.0 — 2026-06-27
+
+### Auto-update từ GitHub Release
+- Tích hợp `electron-updater`: nút `Cập nhật` ở footer giờ kiểm tra bản mới trên GitHub Release thay vì chỉ reload renderer
+- Một nút duy nhất đổi hành vi theo trạng thái: `Kiểm tra cập nhật` → `Đang kiểm tra…` → `Đang tải… %` → `Cài đặt & khởi động lại`; báo `Đang ở bản mới nhất` hoặc lỗi
+- Tự động tải bản mới (`autoDownload`) và cài khi thoát app (`autoInstallOnAppQuit`); nút "Cài đặt & khởi động lại" gọi `quitAndInstall`
+- Thêm IPC `update-check` / `update-install` / `update-status`, expose qua `electronAPI.update` trong preload
+- `package.json`: thêm script `release` (`electron-builder --win --publish always`) và cấu hình `build.publish` provider GitHub (`lhmquan/threads-doctor`)
+
+### Khởi động cùng Windows (autostart) — sửa lỗi
+- Sửa lỗi auto-launch không có tác dụng và hiện màn hình welcome mặc định của Electron khi khởi động lại Windows
+- Khi app chưa đóng gói, truyền đường dẫn project vào `args` của login item để Windows chạy đúng app thay vì `electron.exe` trần
+- Thêm cờ `--hidden`: khi khởi động cùng Windows app thu xuống tray thay vì bật cửa sổ lên giữa màn hình (`wasLaunchedAtLogin`)
+- `getIndexPath`: app đã đóng gói luôn nạp `dist` nội bộ (đảm bảo auto-update nạp đúng bản mới), không dùng đường dẫn source hardcode
+
+### Hạ tầng bảo mật & quy trình (đồng bộ với dự án Aviary)
+- Viết lại `CLAUDE.md` theo "Hard Rules": dữ liệu cấm commit, quy trình commit bắt buộc, quy tắc revoke token, quy tắc "Up Version" 8 bước
+- Thêm `docs/SECURITY.md`: chi tiết bảo mật, lệnh scan secret (PowerShell), quy trình audit/revoke
+- Thêm pre-commit hook `.githooks/pre-commit` chặn commit khi phát hiện secret (kích hoạt: `git config core.hooksPath .githooks`)
+- Mở rộng `.gitignore`: thêm `.claude/`, `out/`, `tmp/`, `*.tmp`, editor/OS files; gom nhóm rõ ràng
+- Cấu hình icon installer NSIS dùng `electron/app.ico`
+- Tạo repo GitHub `lhmquan/threads-doctor` (public) làm nơi backup + nguồn auto-update
+
 ## v0.14.0 — 2026-06-03
 
 ### Google Sheet Sync
