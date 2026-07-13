@@ -1,5 +1,18 @@
 # Changelog — Threads Doctor
 
+## v0.16.0 — 2026-07-13
+
+### Cache avatar (không mất ảnh khi URL hết hạn)
+- Avatar Threads/Instagram là *signed URL* có hạn dùng — hết hạn thì ảnh 404 dù chuỗi URL vẫn còn, khiến avatar biến mất cho tới khi refresh token
+- Thêm component `Avatar`: lúc URL còn sống thì chụp ảnh (crop vuông + downscale 96px, encode JPEG ~5KB) lưu vào `localStorage` theo `account.id`, các lần sau hiển thị thẳng từ cache
+- URL chết vẫn giữ ảnh cache cũ đang hiện; khi refresh token đổi URL mới thì tự chụp lại
+- Thay cả 5 chỗ render avatar (grid, list, chi tiết tài khoản, chip list) sang dùng component chung
+
+### Single-instance lock (sửa lỗi mở app rỗng)
+- Chặn chạy nhiều tiến trình cùng lúc bằng `app.requestSingleInstanceLock()`
+- Nguyên nhân lỗi mất tài khoản: Electron lưu localStorage (LevelDB) chỉ mở được bởi 1 process — mở nhiều bản khiến bản thứ 2 trở đi không đọc được DB đang khoá và hiện app rỗng
+- Nếu đã có bản đang chạy, mở lại app sẽ focus cửa sổ cũ thay vì bật thêm tiến trình mới
+
 ## v0.15.0 — 2026-06-27
 
 ### Auto-update từ GitHub Release

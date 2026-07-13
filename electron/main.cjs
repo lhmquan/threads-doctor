@@ -268,15 +268,29 @@ function installUpdate() {
 ipcMain.handle('update-check', () => checkForUpdates())
 ipcMain.handle('update-install', () => installUpdate())
 
-app.whenReady().then(() => {
-  createWindow()
-  // Gắn listener autoUpdater sau khi window đã tạo để broadcast về renderer.
-  initUpdater()
-  app.on('activate', () => {
-    if (mainWindow === null) createWindow()
-    else showMainWindow()
+// Single-instance lock: chỉ cho phép 1 tiến trình chạy. Electron lưu localStorage
+// (LevelDB) chỉ mở được bởi 1 process — mở nhiều bản sẽ khiến bản thứ 2 trở đi
+// không đọc được DB đang bị khoá và hiện app rỗng (mất tài khoản). Nếu đã có
+// bản chạy, focus lại cửa sổ cũ thay vì bật thêm tiến trình mới.
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    showMainWindow()
   })
-})
+
+  app.whenReady().then(() => {
+    createWindow()
+    // Gắn listener autoUpdater sau khi window đã tạo để broadcast về renderer.
+    initUpdater()
+    app.on('activate', () => {
+      if (mainWindow === null) createWindow()
+      else showMainWindow()
+    })
+  })
+}
 
 app.on('before-quit', () => {
   isQuitting = true

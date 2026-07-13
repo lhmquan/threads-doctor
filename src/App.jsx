@@ -17,6 +17,86 @@ const MAX_SCHEDULE_FAILURE_DETAILS = 12
 const SCHEDULE_FAILURE_PREVIEW = 3
 const LOCKED_AVATAR_SIGNATURE = '573323465_1219825463302212_7278921664109726296_n'
 
+// Avatar Threads/Instagram là signed URL có hạn dùng — hết hạn thì ảnh 404 dù
+// chuỗi URL vẫn còn trong localStorage. Ta chụp lại ảnh (downscale cho gọn)
+// lúc URL còn sống rồi hiển thị từ cache về sau để tránh mất avatar.
+const AVATAR_CACHE_PREFIX = 'td.avatar.v1.'
+
+function getCachedAvatar(id) {
+  if (!id) return null
+  try {
+    const raw = localStorage.getItem(AVATAR_CACHE_PREFIX + id)
+    if (!raw) return null
+    return JSON.parse(raw)
+  } catch { return null }
+}
+
+function setCachedAvatar(id, url, data) {
+  if (!id) return
+  try {
+    localStorage.setItem(AVATAR_CACHE_PREFIX + id, JSON.stringify({ url, data }))
+  } catch {}
+}
+
+// Tải ảnh, crop vuông + downscale rồi encode JPEG để cache nhẹ (~5KB/ảnh).
+function snapshotAvatar(url, size = 96) {
+  return new Promise((resolve, reject) => {
+    // webSecurity:false trong Electron nên canvas không bị taint; KHÔNG set
+    // crossOrigin để tránh CORS-mode fetch fail (CDN Instagram không gửi CORS header).
+    const img = new Image()
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = size
+        canvas.height = size
+        const ctx = canvas.getContext('2d')
+        const s = Math.min(img.width, img.height) || size
+        const sx = (img.width - s) / 2
+        const sy = (img.height - s) / 2
+        ctx.drawImage(img, sx, sy, s, s, 0, 0, size, size)
+        resolve(canvas.toDataURL('image/jpeg', 0.82))
+      } catch (e) { reject(e) }
+    }
+    img.onerror = () => reject(new Error('avatar load failed'))
+    img.src = url
+  })
+}
+
+function Avatar({ account, className, fallback = null }) {
+  const id = account?.id
+  const url = account?.avatar || ''
+  const [src, setSrc] = useState(() => {
+    const c = getCachedAvatar(id)
+    return (c && c.data) || url || null
+  })
+
+  useEffect(() => {
+    const cached = getCachedAvatar(id)
+    // Đã cache đúng URL hiện tại → dùng luôn, không tải lại.
+    if (cached && cached.data && cached.url === url) {
+      setSrc(cached.data)
+      return
+    }
+    // Hiện cache cũ (nếu có) ngay để không vỡ ảnh khi URL đã hết hạn.
+    if (cached && cached.data) setSrc(cached.data)
+    else setSrc(url || null)
+
+    if (!url || !id) return
+    let cancelled = false
+    snapshotAvatar(url)
+      .then(data => {
+        if (cancelled) return
+        setCachedAvatar(id, url, data)
+        setSrc(data)
+      })
+      .catch(() => {}) // URL chết → giữ cache cũ đang hiển thị
+    return () => { cancelled = true }
+  }, [id, url])
+
+  if (!src) return fallback
+  return <img src={src} alt="" className={className} />
+}
+
 function compactErrorMessage(message, max = 120) {
   const text = String(message || 'Lỗi không xác định').replace(/\s+/g, ' ').trim()
   if (text.length <= max) return text
@@ -3971,7 +4051,7 @@ function AccountListRow({ account, settings, selected, onToggleSelect, onRefresh
     <div className={`flex items-center gap-3 px-3 py-2 border-b border-neutral-200 dark:border-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-900/40 ${selected ? 'bg-indigo-50 dark:bg-indigo-500/5' : ''}`}>
       <input type="checkbox" checked={selected} onChange={onToggleSelect} className="w-4 h-4 shrink-0" />
       <div className="w-8 h-8 rounded-full bg-neutral-200 dark:bg-neutral-800 overflow-hidden shrink-0">
-        {a.avatar && <img src={a.avatar} alt="" className="w-full h-full object-cover" />}
+        <Avatar account={a} className="w-full h-full object-cover" />
       </div>
       <button onClick={() => onOpen(a.id)} className="flex-1 min-w-0 text-left">
         <div className="flex items-center gap-2">
@@ -4171,9 +4251,7 @@ function AccountCard({ account, settings, selected, onToggleSelect, onRefresh, o
             : <Square className="w-5 h-5" />}
         </button>
         <button onClick={() => onOpen(a.id)} className="w-12 h-12 rounded-full bg-neutral-200 dark:bg-neutral-800 grid place-items-center overflow-hidden shrink-0 hover:ring-2 hover:ring-indigo-500 transition">
-          {a.avatar
-            ? <img src={a.avatar} alt="" className="w-full h-full object-cover" />
-            : <User className="w-5 h-5 text-neutral-400 dark:text-neutral-400" />}
+          <Avatar account={a} className="w-full h-full object-cover" fallback={<User className="w-5 h-5 text-neutral-400 dark:text-neutral-400" />} />
         </button>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
@@ -4479,7 +4557,7 @@ function ProfileView({ account, settings, navigate, followersBaseline = {}, setF
       <div className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900/50 p-5 mb-6">
         <div className="flex items-start gap-4">
           <div className="w-16 h-16 rounded-full bg-neutral-200 dark:bg-neutral-800 overflow-hidden shrink-0">
-            {account.avatar && <img src={account.avatar} alt="" className="w-full h-full object-cover" />}
+            <Avatar account={account} className="w-full h-full object-cover" />
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
@@ -5128,7 +5206,7 @@ function InteractView({ accounts, settings, navigate }) {
                   }`}
                 >
                   <div className="w-6 h-6 rounded-full bg-neutral-200 dark:bg-neutral-800 overflow-hidden shrink-0">
-                    {a.avatar && <img src={a.avatar} alt="" className="w-full h-full object-cover" />}
+                    <Avatar account={a} className="w-full h-full object-cover" />
                   </div>
                   @{a.username}
                 </button>
