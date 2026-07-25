@@ -1,5 +1,22 @@
 # Changelog — Threads Doctor
 
+## v0.17.0 — 2026-07-25
+
+### Glassmorphism — redesign toàn bộ giao diện
+- Áp dụng ngôn ngữ Glassmorphism theo style brief của NameThatUI mà không thay đổi logic tính năng, API, storage hay IPC
+- Thêm nền aurora nhiều lớp rực rỡ (indigo, fuchsia, sky, amber) làm nguồn màu xuyên qua mọi bề mặt kính ở cả light và dark mode
+- Panel/card dùng kính mờ bán trong suốt (`backdrop-filter: blur(18px)`), viền sáng 1px (mép trên sáng hơn), saturation và shadow rộng tạo chiều sâu xếp lớp
+- Header, dropdown, menu, modal, form control, log box, StatCard, toast, avatar placeholder và scrollbar được đồng bộ cùng hệ vật liệu kính
+- Giữ nguyên màu semantic cho trạng thái sync, scheduler, thành công, cảnh báo và lỗi; primary action vẫn có độ tương phản cao
+
+### Accessibility & fallback
+- Thêm focus outline rõ cho bàn phím và responsive wrap cho header/footer ở cửa sổ hẹp
+- Hỗ trợ `prefers-reduced-transparency`: khi Windows tắt Transparency effects, app bỏ blur nhưng vẫn giữ nền aurora, viền sáng và shadow thay vì trở thành giao diện xám phẳng
+- Thêm fallback gần đục cho môi trường không hỗ trợ `backdrop-filter` và giảm transition khi bật `prefers-reduced-motion`
+
+### Version
+- Đồng bộ version hiển thị trong app (`APP_VERSION`) với `package.json` và `package-lock.json` ở `0.17.0`
+
 ## v0.16.0 — 2026-07-13
 
 ### Cache avatar (không mất ảnh khi URL hết hạn)

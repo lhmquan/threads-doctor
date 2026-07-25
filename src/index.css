@@ -36,3 +36,401 @@ html:not(.dark) .text-lg { color: rgb(17 17 17); }
 /* Ghi đè text-neutral-200/300 (vốn dành cho dark) nếu chưa có dark: variant */
 html:not(.dark) .text-neutral-200,
 html:not(.dark) .text-neutral-300 { color: rgb(38 38 38); }
+
+/* ==========================================================================
+   GLASSMORPHISM
+   Nền aurora rực rỡ là nguồn màu chính; mọi bề mặt là kính mờ bán trong suốt
+   với viền sáng 1px và shadow rộng để tạo cảm giác các tấm kính xếp lớp.
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* Backdrop phải rực: kính đặt trên nền phẳng sẽ ra xám, không ra kính. */
+  --glass-page-bg:
+    radial-gradient(1200px 820px at 4% -8%, rgb(129 140 248 / 0.62), transparent 62%),
+    radial-gradient(1040px 720px at 99% 2%, rgb(232 121 249 / 0.48), transparent 64%),
+    radial-gradient(920px 760px at 14% 104%, rgb(56 189 248 / 0.45), transparent 62%),
+    radial-gradient(820px 620px at 92% 98%, rgb(251 191 36 / 0.32), transparent 62%),
+    linear-gradient(150deg, #eef2ff 0%, #f6f3ff 46%, #ecfeff 100%);
+
+  --glass-blur: 18px;
+  --glass-blur-strong: 26px;
+
+  --glass: rgb(255 255 255 / 0.52);
+  --glass-hover: rgb(255 255 255 / 0.64);
+  --glass-strong: rgb(255 255 255 / 0.74);
+  --glass-soft: rgb(255 255 255 / 0.34);
+  --glass-well: rgb(255 255 255 / 0.30);
+
+  --glass-edge: rgb(255 255 255 / 0.88);
+  --glass-edge-soft: rgb(255 255 255 / 0.55);
+  --glass-sheen: inset 0 1px 0 rgb(255 255 255 / 0.92);
+  --glass-inner: inset 0 1px 2px rgb(30 41 59 / 0.06);
+
+  --glass-lift:
+    0 18px 44px -18px rgb(30 41 59 / 0.30),
+    0 6px 18px -10px rgb(30 41 59 / 0.16);
+  --glass-float:
+    0 34px 80px -24px rgb(30 41 59 / 0.42),
+    0 12px 32px -14px rgb(30 41 59 / 0.22);
+}
+
+html.dark {
+  color-scheme: dark;
+
+  --glass-page-bg:
+    radial-gradient(1200px 820px at 4% -8%, rgb(99 102 241 / 0.55), transparent 62%),
+    radial-gradient(1040px 720px at 99% 2%, rgb(192 38 211 / 0.42), transparent 64%),
+    radial-gradient(920px 760px at 14% 104%, rgb(14 165 233 / 0.38), transparent 62%),
+    radial-gradient(820px 620px at 92% 98%, rgb(244 63 94 / 0.20), transparent 62%),
+    linear-gradient(150deg, #060514 0%, #0b0a20 46%, #071322 100%);
+
+  /* Đúng recipe của style: rgba(255,255,255,.12) + border rgba(255,255,255,.25) */
+  --glass: rgb(255 255 255 / 0.11);
+  --glass-hover: rgb(255 255 255 / 0.16);
+  --glass-strong: rgb(11 13 32 / 0.74);
+  --glass-soft: rgb(255 255 255 / 0.06);
+  --glass-well: rgb(2 6 23 / 0.34);
+
+  --glass-edge: rgb(255 255 255 / 0.26);
+  --glass-edge-soft: rgb(255 255 255 / 0.13);
+  --glass-sheen: inset 0 1px 0 rgb(255 255 255 / 0.22);
+  --glass-inner: inset 0 1px 2px rgb(0 0 0 / 0.30);
+
+  --glass-lift:
+    0 20px 48px -18px rgb(0 0 0 / 0.60),
+    0 6px 18px -10px rgb(0 0 0 / 0.40);
+  --glass-float:
+    0 36px 84px -24px rgb(0 0 0 / 0.72),
+    0 12px 32px -14px rgb(0 0 0 / 0.46);
+}
+
+body {
+  background: var(--glass-page-bg);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+/* Shell giữ nguyên layout, chỉ để nền aurora xuyên qua mọi lớp kính. */
+#root > .min-h-screen {
+  background-color: transparent !important;
+}
+
+/* --------------------------------------------------------------------------
+   Thanh điều hướng: tấm kính nổi trên cùng, viền trên sáng hơn viền dưới.
+   -------------------------------------------------------------------------- */
+header.sticky[class~="backdrop-blur"] {
+  background-color: var(--glass-strong) !important;
+  border-color: var(--glass-edge-soft) !important;
+  box-shadow: var(--glass-sheen), var(--glass-lift);
+  backdrop-filter: blur(var(--glass-blur-strong)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(180%);
+}
+
+/* --------------------------------------------------------------------------
+   Panel / card trung tính -> kính. Phủ cả rounded-2xl, rounded-xl, rounded-lg.
+   -------------------------------------------------------------------------- */
+[class~="bg-white"][class~="rounded-2xl"][class~="border"],
+[class~="bg-white"][class~="rounded-xl"][class~="border"],
+[class~="bg-white"][class~="rounded-lg"][class~="border"] {
+  background-color: var(--glass) !important;
+  border-color: var(--glass-edge-soft) !important;
+  border-top-color: var(--glass-edge) !important;
+  box-shadow: var(--glass-sheen), var(--glass-lift);
+  backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+}
+
+html.dark [class~="dark:bg-neutral-900/50"][class~="border"],
+html.dark [class~="dark:bg-neutral-900/40"][class~="border"],
+html.dark [class~="dark:bg-neutral-800/60"][class~="border"] {
+  background-color: var(--glass) !important;
+  border-color: var(--glass-edge-soft) !important;
+  border-top-color: var(--glass-edge) !important;
+}
+
+/* Hover: tấm kính sáng lên và nổi cao hơn, không đổi layout. */
+[class~="bg-white"][class~="rounded-2xl"][class~="border"]:hover,
+[class~="bg-white"][class~="rounded-xl"][class~="border"]:hover,
+html.dark [class~="dark:bg-neutral-900/50"][class~="border"]:hover,
+html.dark [class~="dark:bg-neutral-900/40"][class~="border"]:hover {
+  background-color: var(--glass-hover) !important;
+  box-shadow: var(--glass-sheen), var(--glass-float);
+}
+
+/* StatCard đang active: giữ nguyên màu trạng thái, chỉ thêm chất kính. */
+[class~="rounded-2xl"][class~="border"][class~="bg-neutral-100"],
+[class~="rounded-2xl"][class~="border"][class~="bg-emerald-50"],
+[class~="rounded-2xl"][class~="border"][class~="bg-rose-50"],
+[class~="rounded-2xl"][class~="border"][class~="bg-orange-50"],
+[class~="rounded-2xl"][class~="border"][class~="bg-amber-50"] {
+  box-shadow: var(--glass-sheen), var(--glass-float);
+  backdrop-filter: blur(var(--glass-blur)) saturate(170%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(170%);
+}
+
+/* --------------------------------------------------------------------------
+   Menu / dropdown: kính đặc hơn card vì luôn nổi trên nội dung phức tạp.
+   -------------------------------------------------------------------------- */
+[class~="z-50"][class~="bg-white"][class~="shadow-lg"],
+[class~="z-50"][class~="bg-white"][class~="shadow-xl"] {
+  background-color: var(--glass-strong) !important;
+  border-color: var(--glass-edge) !important;
+  box-shadow: var(--glass-sheen), var(--glass-float);
+  backdrop-filter: blur(var(--glass-blur-strong)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(180%);
+}
+
+html.dark [class~="z-50"][class~="dark:bg-neutral-900"][class~="shadow-lg"],
+html.dark [class~="z-50"][class~="dark:bg-neutral-900"][class~="shadow-xl"] {
+  background-color: var(--glass-strong) !important;
+  border-color: var(--glass-edge) !important;
+}
+
+/* --------------------------------------------------------------------------
+   Panel màu nghiệp vụ (sync, scheduler, cảnh báo): giữ tint, thêm kính.
+   -------------------------------------------------------------------------- */
+[class~="bg-indigo-500/5"][class~="border"],
+[class~="bg-amber-500/5"][class~="border"],
+[class~="bg-sky-500/5"][class~="border"],
+[class~="bg-rose-500/5"][class~="border"],
+[class~="bg-emerald-500/5"][class~="border"],
+[class~="bg-indigo-500/10"][class~="border"],
+[class~="bg-amber-500/10"][class~="border"],
+[class~="bg-rose-500/10"][class~="border"],
+[class~="bg-emerald-500/10"][class~="border"] {
+  box-shadow: var(--glass-sheen), var(--glass-lift);
+  backdrop-filter: blur(var(--glass-blur)) saturate(165%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(165%);
+}
+
+/* --------------------------------------------------------------------------
+   Vùng "well" lồng trong kính (log box, cache chip): lõm, không blur thêm
+   để tránh nested backdrop-filter tốn GPU.
+   -------------------------------------------------------------------------- */
+div[class~="bg-neutral-100"][class~="rounded-lg"][class~="border"],
+div[class~="bg-neutral-100"][class~="rounded-xl"][class~="border"] {
+  background-color: var(--glass-well) !important;
+  border-color: var(--glass-edge-soft) !important;
+  box-shadow: var(--glass-inner);
+}
+
+html.dark div[class~="dark:bg-neutral-950"][class~="rounded-lg"][class~="border"],
+html.dark div[class~="dark:bg-neutral-900"][class~="rounded-lg"][class~="border"] {
+  background-color: var(--glass-well) !important;
+  border-color: var(--glass-edge-soft) !important;
+}
+
+/* --------------------------------------------------------------------------
+   Form control: ô nhập lõm vào mặt kính, viền sáng, focus rõ.
+   -------------------------------------------------------------------------- */
+input[class~="bg-neutral-100"],
+textarea[class~="bg-neutral-100"],
+select[class~="bg-neutral-100"] {
+  background-color: var(--glass-well) !important;
+  border-color: var(--glass-edge-soft) !important;
+  box-shadow: var(--glass-inner);
+}
+
+html.dark input[class~="dark:bg-neutral-950"],
+html.dark textarea[class~="dark:bg-neutral-950"],
+html.dark select[class~="dark:bg-neutral-950"],
+html.dark input[class~="dark:bg-neutral-900"],
+html.dark textarea[class~="dark:bg-neutral-900"],
+html.dark select[class~="dark:bg-neutral-900"] {
+  background-color: var(--glass-well) !important;
+  border-color: var(--glass-edge-soft) !important;
+}
+
+/* Dropdown native do OS vẽ, phải ép màu để không bị trắng trên nền tối. */
+select option {
+  color: #171717;
+  background: #fff;
+}
+
+html.dark select option {
+  color: #f5f5f5;
+  background: #12142a;
+}
+
+/* --------------------------------------------------------------------------
+   Nút bấm: primary vẫn đậm để đọc được trên mọi vùng nền, thêm bevel kính.
+   -------------------------------------------------------------------------- */
+button[class~="bg-indigo-500"],
+button[class~="bg-indigo-600"] {
+  background-image: linear-gradient(135deg, rgb(99 102 241 / 0.98), rgb(168 85 247 / 0.94));
+  border: 1px solid rgb(255 255 255 / 0.28);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.38),
+    0 12px 26px -10px rgb(79 70 229 / 0.55);
+}
+
+button[class~="bg-amber-500"],
+button[class~="bg-emerald-500"],
+button[class~="bg-emerald-600"],
+button[class~="bg-rose-600"] {
+  border: 1px solid rgb(255 255 255 / 0.24);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.32),
+    0 12px 26px -12px rgb(15 23 42 / 0.45);
+}
+
+/* Nút phụ: kính mỏng, viền sáng. */
+button[class~="border-neutral-200"],
+button[class~="border-neutral-300"] {
+  background-color: var(--glass-soft);
+  border-color: var(--glass-edge-soft) !important;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.28);
+  backdrop-filter: blur(10px) saturate(150%);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+}
+
+html.dark button[class~="dark:border-neutral-800"],
+html.dark button[class~="dark:border-neutral-700"] {
+  border-color: var(--glass-edge-soft) !important;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid rgb(129 140 248 / 0.90);
+  outline-offset: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   Modal: overlay làm mờ nền, dialog là tấm kính dày nhất trong hệ thống.
+   -------------------------------------------------------------------------- */
+.fixed.inset-0[class~="bg-black/60"] {
+  background-color: rgb(2 6 23 / 0.52) !important;
+  backdrop-filter: blur(10px) saturate(130%);
+  -webkit-backdrop-filter: blur(10px) saturate(130%);
+}
+
+.fixed.inset-0[class~="bg-black/60"] > [class~="rounded-2xl"] {
+  background-color: var(--glass-strong) !important;
+  border-color: var(--glass-edge) !important;
+  box-shadow: var(--glass-sheen), var(--glass-float);
+  backdrop-filter: blur(var(--glass-blur-strong)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(180%);
+}
+
+/* Toast cũng là kính nổi, giữ nguyên màu semantic của nó. */
+[class~="fixed"][class~="z-\[60\]"] > div > div {
+  box-shadow: var(--glass-sheen), var(--glass-float);
+}
+
+/* Avatar placeholder hoà vào mặt kính thay vì thành khối xám đặc. */
+[class~="rounded-full"][class~="bg-neutral-200"] {
+  background-color: var(--glass-well) !important;
+  box-shadow: var(--glass-inner);
+}
+
+/* Scrollbar mảnh, tông kính. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(148 163 184 / 0.45) transparent;
+}
+
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background-color: rgb(148 163 184 / 0.40);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(148 163 184 / 0.65);
+}
+
+@media (max-width: 760px) {
+  header.sticky > div {
+    gap: 0.75rem;
+    padding-inline: 1rem;
+  }
+
+  header.sticky > div > :last-child,
+  #root > .min-h-screen > footer {
+    flex-wrap: wrap;
+  }
+
+  #root > .min-h-screen > footer {
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Fallback: layout phải sống sót khi không có blur, và tôn trọng thiết lập
+   giảm trong suốt / giảm chuyển động của hệ điều hành.
+   -------------------------------------------------------------------------- */
+@supports not (backdrop-filter: blur(1px)) {
+  header.sticky[class~="backdrop-blur"],
+  [class~="bg-white"][class~="rounded-2xl"][class~="border"],
+  [class~="bg-white"][class~="rounded-xl"][class~="border"],
+  [class~="bg-white"][class~="rounded-lg"][class~="border"],
+  [class~="z-50"][class~="bg-white"][class~="shadow-lg"],
+  [class~="z-50"][class~="bg-white"][class~="shadow-xl"] {
+    background-color: rgb(255 255 255 / 0.92) !important;
+  }
+
+  html.dark header.sticky[class~="backdrop-blur"],
+  html.dark [class~="dark:bg-neutral-900/50"][class~="border"],
+  html.dark [class~="dark:bg-neutral-900/40"][class~="border"],
+  html.dark [class~="z-50"][class~="dark:bg-neutral-900"][class~="shadow-lg"],
+  html.dark [class~="z-50"][class~="dark:bg-neutral-900"][class~="shadow-xl"] {
+    background-color: rgb(24 26 48 / 0.94) !important;
+  }
+}
+
+/* Khi OS tắt transparency: bỏ blur nhưng GIỮ nền aurora + viền sáng + shadow
+   xếp lớp, để giao diện vẫn có chiều sâu thay vì sập về xám phẳng. */
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --glass: rgb(255 255 255 / 0.90);
+    --glass-hover: rgb(255 255 255 / 0.96);
+    --glass-strong: rgb(255 255 255 / 0.96);
+    --glass-soft: rgb(255 255 255 / 0.82);
+    --glass-well: rgb(241 245 249 / 0.94);
+  }
+
+  html.dark {
+    --glass: rgb(21 24 46 / 0.92);
+    --glass-hover: rgb(28 32 58 / 0.96);
+    --glass-strong: rgb(15 17 36 / 0.97);
+    --glass-soft: rgb(24 27 52 / 0.86);
+    --glass-well: rgb(8 10 24 / 0.94);
+  }
+
+  header.sticky[class~="backdrop-blur"],
+  [class~="bg-white"][class~="rounded-2xl"][class~="border"],
+  [class~="bg-white"][class~="rounded-xl"][class~="border"],
+  [class~="bg-white"][class~="rounded-lg"][class~="border"],
+  [class~="z-50"][class~="bg-white"][class~="shadow-lg"],
+  [class~="z-50"][class~="bg-white"][class~="shadow-xl"],
+  [class~="bg-indigo-500/5"][class~="border"],
+  [class~="bg-amber-500/5"][class~="border"],
+  [class~="bg-sky-500/5"][class~="border"],
+  [class~="bg-rose-500/5"][class~="border"],
+  [class~="bg-emerald-500/5"][class~="border"],
+  button[class~="border-neutral-200"],
+  button[class~="border-neutral-300"],
+  .fixed.inset-0[class~="bg-black/60"],
+  .fixed.inset-0[class~="bg-black/60"] > [class~="rounded-2xl"] {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .fixed.inset-0[class~="bg-black/60"] {
+    background-color: rgb(2 6 23 / 0.72) !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [class~="transition-all"] {
+    transition-duration: 0.01ms !important;
+  }
+}
