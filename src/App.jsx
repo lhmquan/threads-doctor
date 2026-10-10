@@ -10,7 +10,7 @@ import { parseThreadsUrl } from './lib/threads-url.js'
 import { loadAccounts, saveAccounts, loadSettings, saveSettings, loadFollowersBaseline, saveFollowersBaseline, loadSchedules, saveSchedules, loadScheduleLogs, saveScheduleLogs, loadAppLogs, saveAppLogs, loadBuffSchedules, saveBuffSchedules, loadBuffLogs, saveBuffLogs, loadBuffFavouriteWorkers, saveBuffFavouriteWorkers } from './lib/storage.js'
 import { cacheClear, cacheGet, cacheSet, cacheStats, cacheEntries, formatBytes } from './lib/cache.js'
 
-const APP_VERSION = '0.17.0'
+const APP_VERSION = '0.18.0'
 const MAX_SCHEDULE_LOGS = 200
 const MAX_APP_LOGS = 1500
 const MAX_SCHEDULE_FAILURE_DETAILS = 12
@@ -676,6 +676,8 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
   }, [])
   const [editingScheduleId, setEditingScheduleId] = useState(null)
   const [scheduledTasks, setScheduledTasks] = useState(() => loadSchedules())
+  const scheduledTasksRef = useRef(scheduledTasks)
+  useEffect(() => { scheduledTasksRef.current = scheduledTasks }, [scheduledTasks])
   const [scheduleLogs, setScheduleLogs] = useState(() => loadScheduleLogs().slice(0, MAX_SCHEDULE_LOGS))
   const [appLogs, setAppLogs] = useState(() => loadAppLogs().slice(0, MAX_APP_LOGS))
   const [expandedScheduleFailures, setExpandedScheduleFailures] = useState(() => new Set())
@@ -1282,8 +1284,21 @@ function App({ path, navigate, dark, toggleTheme, followersBaseline = {}, setFol
       if (task.nextRunAt && task.nextRunAt > now) armTask(task)
     }
 
+    // Safety-net interval: kiểm tra mỗi 30s để bắt task bị miss do sleep/throttle
+    // runTask đã có taskRunLockRef chống double-fire, nên chỉ cần gọi trực tiếp
+    const safetyNetTimer = setInterval(() => {
+      const nowCheck = Date.now()
+      scheduledTasksRef.current.forEach(task => {
+        if (task.status !== 'active' || !task.nextRunAt) return
+        if (task.nextRunAt <= nowCheck) {
+          runTaskRef.current?.(task.id)
+        }
+      })
+    }, 30 * 1000)
+
     return () => {
       clearAllTaskTimers()
+      clearInterval(safetyNetTimer)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

@@ -1,5 +1,15 @@
 # Changelog — Threads Doctor
 
+## v0.18.0 — 2026-07-25
+
+### Sửa lỗi hẹn giờ chạy sai giờ
+- Scheduler chỉ dùng `setTimeout` cho mỗi task, nên khi máy tính sleep/suspend hoặc cửa sổ bị Chromium throttle/đóng băng, timer bị hoãn lại — lịch hẹn chạy muộn hàng giờ (vd hẹn 12:00 nhưng chạy lúc ~14:16)
+- Thêm safety-net interval kiểm tra mỗi 30 giây: task nào đã quá `nextRunAt` mà chưa chạy sẽ được kích hoạt ngay, đảm bảo trễ tối đa ~30 giây thay vì hàng giờ
+- Thêm `scheduledTasksRef` để interval luôn đọc được danh sách task mới nhất; tận dụng `taskRunLockRef` sẵn có để chống chạy trùng
+
+### Version
+- Đồng bộ version hiển thị trong app (`APP_VERSION`) với `package.json` và `package-lock.json` ở `0.18.0`
+
 ## v0.17.0 — 2026-07-25
 
 ### Glassmorphism — redesign toàn bộ giao diện
